@@ -64,7 +64,10 @@ static std::condition_variable g_midiCv;
 static std::deque<DWORD>       g_midiQ;                  // packed short messages (dwParam1)
 
 // ---- live view on-demand cache ----
-struct LvFrame { std::string jpeg; std::string frames; };
+// seq растёт только когда кадр РЕАЛЬНО изменился. Клиент присылает свой seq и
+// получает 304 вместо повторной пересылки той же картинки — иначе при высокой
+// частоте опроса однопоточный сервер тратил бы всё время на отдачу дублей.
+struct LvFrame { std::string jpeg; std::string frames; long long seq = 0; };
 static std::mutex               g_lvMutex;
 static std::map<int, LvFrame>   g_lvCache;      // camIndex -> latest {jpeg, frames}
 static std::map<int, long long> g_lvActiveMs;   // camIndex -> last /liveview request (steady ms)
@@ -485,7 +488,7 @@ static void maybeOfferFirewallRules() {
 static bool        jsonGet(const std::string&, const std::string&, std::string&);   // определены ниже
 static std::string jsonEscape(const std::string&);
 
-static const char*    kAppVersion = "1.0.1";
+static const char*    kAppVersion = "1.0.2";
 // ЗАПОЛНИТЬ после создания репозитория, формат "владелец/репозиторий".
 // Пустая строка = проверка обновлений выключена.
 static const wchar_t* kUpdateRepo = L"GIDEONSYSTEM/signalbox";
@@ -1888,17 +1891,36 @@ static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std:
         // /liveview/<n>.jpg -> latest cached JPEG + frames header. Marks the
         // camera "active" so the worker keeps pulling frames (on-demand).
         int idx = std::atoi(req.path.c_str() + std::string("/liveview/").size());
+        // ?seq=N — какой кадр уже есть у клиента
+        long long haveSeq = -1;
+        {
+            const size_t q = req.path.find("seq=");
+            if (q != std::string::npos) haveSeq = _atoi64(req.path.c_str() + q + 4);
+        }
         std::string jpeg, frames;
+        long long seq = 0;
         { std::lock_guard<std::mutex> lk(g_lvMutex);
           g_lvActiveMs[idx] = nowSteadyMs();
           auto it = g_lvCache.find(idx);
-          if (it != g_lvCache.end()) { jpeg = it->second.jpeg; frames = it->second.frames; } }
+          if (it != g_lvCache.end()) {
+              seq = it->second.seq;
+              if (seq != haveSeq) { jpeg = it->second.jpeg; frames = it->second.frames; }
+          } }
+        if (seq && seq == haveSeq) {                  // кадр не менялся — ничего не шлём
+            r.status = 304; r.statusText = "Not Modified";
+            r.extraHeaders = "X-Cam-Seq: " + std::to_string(seq) + "\r\n"
+                             "Access-Control-Expose-Headers: X-Cam-Frames, X-Cam-Seq\r\n";
+            r.contentType.clear();
+            return r;
+        }
         if (jpeg.empty()) {
             r.status = 503; r.statusText = "Service Unavailable";
             r.body = "live view not ready"; return r;
         }
         r.contentType  = "image/jpeg";
-        r.extraHeaders = "X-Cam-Frames: " + (frames.empty() ? std::string("[]") : frames) + "\r\n";
+        r.extraHeaders = "X-Cam-Frames: " + (frames.empty() ? std::string("[]") : frames) + "\r\n"
+                         "X-Cam-Seq: " + std::to_string(seq) + "\r\n"
+                         "Access-Control-Expose-Headers: X-Cam-Frames, X-Cam-Seq\r\n";
         r.body = std::move(jpeg);
         return r;
     }
@@ -2003,12 +2025,13 @@ static void stopMidi() {
     g_midiIn.clear();
 }
 
-// Pulls live-view frames (~7 fps) only for cameras whose preview is currently
-// open (a /liveview request within the last ~1.5 s) and caches the latest JPEG +
-// frame rectangles so the HTTP handler can serve them instantly.
+// Тянет кадры только для камер с открытым превью (запрос /liveview за последние
+// ~1.5 с) и держит последний JPEG в кэше, чтобы HTTP-обработчик отдавал мгновенно.
+// Частота — максимум, который отдаёт камера: спим лишь чуть-чуть, чтобы не крутить
+// пустой цикл. Реальный потолок задаёт сама камера и Wi-Fi, а не эта константа.
 static void liveViewWorker() {
     const long long activeWindowMs = 1500;
-    const auto      frameGap = std::chrono::milliseconds(1000 / 7);   // ~7 fps
+    const auto      frameGap = std::chrono::milliseconds(5);   // не ограничиваем, только уступаем CPU
     while (g_running.load()) {
         auto t0 = std::chrono::steady_clock::now();
         std::vector<CameraSession*> cams;
@@ -2026,8 +2049,12 @@ static void liveViewWorker() {
             if (c->grabLiveView(jpeg, frames)) {
                 std::lock_guard<std::mutex> lk(g_lvMutex);
                 auto& e = g_lvCache[c->index()];
-                e.jpeg   = std::move(jpeg);
+                // Камера нередко отдаёт тот же самый кадр несколько раз подряд.
+                // Считаем его новым только если картинка действительно изменилась —
+                // иначе клиент будет качать дубли.
+                const bool changed = (e.jpeg.size() != jpeg.size()) || (e.jpeg != jpeg);
                 e.frames = std::move(frames);
+                if (changed) { e.jpeg = std::move(jpeg); ++e.seq; }
             }
         }
         auto elapsed = std::chrono::steady_clock::now() - t0;

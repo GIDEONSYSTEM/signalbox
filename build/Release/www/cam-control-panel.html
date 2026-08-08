@@ -577,8 +577,13 @@ function lvDraw(e){
 }
 async function lvTick(e){
   try{
-    const r=await fetch(`${LV_BASE}/liveview/${e.camNum}.jpg?t=${Date.now()}`,{cache:'no-store'});
+    // Присылаем номер кадра, который уже показан. Если камера с тех пор ничего
+    // нового не выдала — сервер ответит 304, и картинку мы не перекачиваем.
+    const seq = e.lvSeq || 0;
+    const r=await fetch(`${LV_BASE}/liveview/${e.camNum}.jpg?seq=${seq}`,{cache:'no-store'});
+    if(r.status === 304) return;
     if(!r.ok) throw 0;
+    e.lvSeq = r.headers.get('X-Cam-Seq') || seq;
     const hdr=r.headers.get('X-Cam-Frames');
     const blob=await r.blob();
     const url=URL.createObjectURL(blob);
@@ -595,7 +600,9 @@ async function lvTick(e){
 function lvStart(e){
   if(e.lvOn) return;
   e.lvOn=true;
-  const loop=async()=>{ if(!e.lvOn) return; await lvTick(e); if(e.lvOn) e.lvTimer=setTimeout(loop, 143); };
+  // 33 мс = потолок 30 к/с. Реально столько отдаст только камера с хорошим Wi-Fi;
+  // когда нового кадра нет, запрос стоит копейки (304 без тела).
+  const loop=async()=>{ if(!e.lvOn) return; await lvTick(e); if(e.lvOn) e.lvTimer=setTimeout(loop, 33); };
   loop();
 }
 function lvStop(e){
