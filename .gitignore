@@ -1,0 +1,24 @@
+# --- результаты сборки ---
+# Папку build не храним, КРОМЕ build/Release/www — там лежит сам интерфейс панели,
+# он редактируется руками и является исходником, просто исторически живёт рядом с exe.
+/build/*
+!/build/Release/
+/build/Release/*
+!/build/Release/www/
+
+# --- данные конкретной установки, а не код ---
+# (они и так внутри build/Release, но перечислим явно — на случай переноса)
+cameras.txt
+cameras-known.txt
+groups.json
+settings.json
+firewall-skip.txt
+*.log
+*.log.prev
+
+# --- прочее ---
+.vs/
+*.user
+*.zip
+Thumbs.db
+desktop.ini

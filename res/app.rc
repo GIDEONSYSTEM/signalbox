@@ -1,0 +1,2 @@
+// Application icon (Explorer/taskbar use the lowest-numbered ICON resource).
+1 ICON "icon.ico"

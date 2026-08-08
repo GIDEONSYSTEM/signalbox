@@ -1,0 +1,1267 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SignalBox</title>
+<!-- Шрифты только локальные (www/fonts/). Внешних запросов быть не должно:
+     <link> на шрифты блокирует отрисовку, и на устройстве без интернета или
+     с VPN страница висела чёрной, пока запрос не отвалится по тайм-ауту. -->
+<link rel="stylesheet" href="fonts.css">
+<!-- QR: проверенная библиотека qrcode-generator (MIT), лежит локально в www/.
+     Заменила самописный генератор — тот давал матрицу, которую телефоны не читали. -->
+<script src="qrcode.js"></script>
+<style>
+  :root{
+    --ok:#41d67e; --warn:#ffc24b; --crit:#ff4d4d; --idle:#7d8794;
+    --bat-ok:#33b466;   /* наполнение батареи — чуть темнее обычного зелёного */
+    --bg:#0a0d11; --panel:#12161c; --panel-2:#161b22;
+    --edge:rgba(255,255,255,.09); --edge-2:rgba(255,255,255,.06);
+    --ink:#eef2f6; --ink-dim:#94a0ac;
+    --mono:"JetBrains Mono",ui-monospace,monospace;
+    --ui:"Saira",system-ui,sans-serif; --cond:"Saira Condensed","Saira",sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;min-height:100%;}
+  body{
+    font-family:var(--ui); color:var(--ink);
+    background:
+      radial-gradient(900px 500px at 80% -20%, #182230 0%, var(--bg) 60%),
+      var(--bg);
+  }
+  body::before{ /* лёгкая текстура для глубины */
+    content:""; position:fixed; inset:0; pointer-events:none; opacity:.4;
+    background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);
+    background-size:40px 40px;
+  }
+  /* Панель тянется в ширину: на большом экране группы встают в несколько колонок,
+     в узком доке OBS всё сворачивается обратно в одну — сетка адаптивная. */
+  #app{position:relative; padding:14px; max-width:1680px; margin:0 auto; display:flex; flex-direction:column; gap:11px;}
+  /* Верхние блоки не растягиваем на всю ширину и держим по центру — как в старой панели. */
+  .head, .ipbox, .empty{max-width:560px; width:100%; margin-left:auto; margin-right:auto;}
+  /* блок «доступ к панели» — ровно по ширине группы, иначе между адресом и QR зияет пустота */
+  .share{max-width:392px; width:100%; margin-left:auto; margin-right:auto;}
+
+  /* header */
+  .head{display:flex; align-items:center; justify-content:space-between; padding:0 2px 2px;}
+  .title{font-weight:700; letter-spacing:.14em; font-size:13px; text-transform:uppercase; color:var(--ink-dim);}
+  .badge{display:flex; align-items:center; gap:6px; font-family:var(--cond); font-weight:600;
+         letter-spacing:.1em; font-size:10px; text-transform:uppercase;}
+  .badge .d{width:7px;height:7px;border-radius:50%;}
+  .badge.demo{color:var(--warn)} .badge.demo .d{background:var(--warn)}
+  .badge.live{color:var(--ok)}   .badge.live .d{background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  .head-r{display:flex; align-items:center; gap:10px;}
+  .rst{display:inline-flex; align-items:center; justify-content:center; min-height:20px; padding:2px 7px;
+       background:var(--panel-2); border:1px solid var(--edge); border-radius:7px; color:var(--ink-dim);
+       font-family:var(--cond); font-weight:700; letter-spacing:.08em; font-size:10px; text-transform:uppercase;
+       cursor:pointer; user-select:none; line-height:1;}
+  .rst:hover{color:var(--ink); border-color:rgba(255,255,255,.2);}
+  .rst.arm{color:#0a0d11; background:var(--warn); border-color:var(--warn);}   /* «Точно?» */
+  .rst.off:hover{color:var(--crit); border-color:rgba(255,77,77,.45);}
+  .rst.off.arm{color:#fff; background:var(--crit); border-color:var(--crit);}
+  /* квадратные кнопки-иконки (перезагрузка / выключение) */
+  .icobtn{display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; padding:0;
+          background:var(--panel-2); border:1px solid var(--edge); border-radius:7px; color:var(--ink-dim);
+          cursor:pointer; user-select:none; font-family:var(--cond); font-weight:700; font-size:12px;}
+  .icobtn svg{display:block;}
+  .icobtn:hover{color:var(--ink); border-color:rgba(255,255,255,.2);}
+  .icobtn.arm{color:#0a0d11; background:var(--warn); border-color:var(--warn);}      /* «точно?» */
+  .icobtn.off:hover{color:var(--crit); border-color:rgba(255,77,77,.45);}
+  .icobtn.off.arm{color:#fff; background:var(--crit); border-color:var(--crit);}
+  /* экран после выключения сборщика */
+  .off-screen{position:fixed; inset:0; z-index:70; display:none; align-items:center; justify-content:center;
+              background:rgba(8,10,13,.94); padding:24px; text-align:center;}
+  .off-screen.show{display:flex;}
+  .off-title{font-family:var(--cond); font-weight:700; letter-spacing:.12em; font-size:15px;
+             text-transform:uppercase; color:var(--ink-dim); margin-bottom:10px;}
+  .off-hint{font-size:12px; line-height:1.6; color:var(--idle); max-width:320px;}
+
+  @keyframes pulse{50%{opacity:.62}}
+
+  /* блок «доступ к панели»: адрес (клик — копировать) + QR */
+  .share{display:flex; align-items:center; justify-content:space-between; gap:12px;
+         background:var(--panel); border:1px solid var(--edge); border-radius:11px; padding:9px 12px;}
+  .share-txt{min-width:0;}
+  .share-cap{font-family:var(--cond); font-weight:600; letter-spacing:.06em; font-size:9px;
+             text-transform:uppercase; color:var(--ink-dim); margin-bottom:4px;}
+  .share-url{display:block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+             background:none; border:none; padding:0; text-align:left; cursor:pointer;
+             font-family:var(--mono); font-weight:700; font-size:13px; color:var(--ok);}
+  .share-url:hover{text-decoration:underline;}
+  .share-qr{flex:none; width:120px; height:120px; border-radius:6px; overflow:hidden; background:#fff; cursor:zoom-in;}
+  .share-qr svg{display:block; width:100%; height:100%;}
+  .qr-modal{position:fixed; inset:0; z-index:60; display:none; align-items:center; justify-content:center;
+            background:rgba(0,0,0,.74); padding:20px; -webkit-tap-highlight-color:transparent;}
+  .qr-modal.show{display:flex;}
+  .qr-modal-card{background:#fff; border-radius:16px; padding:22px 22px 16px; display:flex; flex-direction:column;
+                 align-items:center; gap:12px; max-width:94vw; box-shadow:0 20px 60px rgba(0,0,0,.5);}
+  .qr-big{width:min(80vw,320px); height:min(80vw,320px);}
+  .qr-big svg{display:block; width:100%; height:100%;}
+  .qr-big-url{font-family:var(--mono); font-weight:700; font-size:14px; color:#0a0d11; word-break:break-all; text-align:center;}
+  .qr-big-hint{font-family:var(--cond); font-weight:600; font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:#7a8390;}
+  .toast{position:fixed; left:50%; bottom:22px; transform:translateX(-50%) translateY(10px);
+         background:var(--ok); color:#0a0d11; font-family:var(--cond); font-weight:700; letter-spacing:.05em;
+         font-size:12px; text-transform:uppercase; padding:9px 16px; border-radius:9px;
+         opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; z-index:100;}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
+  /* группы камер (съёмочные залы) */
+  .grp{background:rgba(255,255,255,.02); border:1px solid var(--edge); border-radius:13px;
+       padding:9px 10px 10px; display:flex; flex-direction:column; gap:9px;}
+  .grp.bare{background:none; border:none; padding:0; gap:11px;}      /* групп нет — панель как раньше */
+  .grp.bare .grp-head, .grp.bare .grp-ctl{display:none;}
+  .grp-head{display:flex; align-items:center; gap:6px; flex-wrap:wrap;}   /* имя + Запись/Стоп в одну строку */
+  /* сворачивание группы: треугольник слева от названия */
+  .grp-tri{flex:none; background:none; border:none; color:var(--ink-dim); cursor:pointer;
+           padding:2px 3px; font-size:10px; line-height:1; transition:transform .15s;}
+  .grp-tri:hover{color:var(--ink);}
+  .grp.collapsed .grp-tri{transform:rotate(-90deg);}
+  /* свёрнутая группа: прячем карточки, ряд регуляторов и кнопки записи */
+  .grp.collapsed .grp-ctl,
+  .grp.collapsed .grp-body,
+  .grp.collapsed .gbtn{display:none;}
+  /* индикатор REC группы: горит, только если ПИШУТ ВСЕ камеры группы */
+  .grp-rec{flex:none; display:flex; align-items:center; gap:4px; color:var(--idle);
+           font-family:var(--cond); font-weight:700; letter-spacing:.08em;
+           font-size:9px; text-transform:uppercase;}
+  .grp-rec .d{width:7px; height:7px; border-radius:50%; background:var(--idle);}
+  .grp-rec.on{color:var(--crit);}
+  .grp-rec.on .d{background:var(--crit); box-shadow:0 0 8px var(--crit); animation:pulse 1s infinite;}
+  .grp-name{flex:1 1 120px; min-width:0; background:none; border:1px solid transparent; border-radius:7px;
+            padding:3px 6px; color:var(--ink); font-family:var(--cond); font-weight:700;
+            letter-spacing:.08em; font-size:12px; text-transform:uppercase;}
+  .grp-name:hover{border-color:var(--edge);}
+  .grp-name:focus{outline:none; border-color:var(--ok); background:var(--panel-2);}
+  .grp-count{flex:none; font-family:var(--cond); font-size:10px; letter-spacing:.06em; color:var(--idle);}
+  .grp-del{flex:none; background:none; border:none; color:var(--idle); cursor:pointer;
+           font-size:15px; line-height:1; padding:2px 6px; border-radius:6px;}
+  .grp-del:hover{color:var(--crit); background:rgba(255,77,77,.1);}
+  .grp-ctl{display:flex; flex-wrap:wrap; gap:5px; align-items:center;}
+  .gbtn{background:var(--panel-2); border:1px solid var(--edge); border-radius:7px; color:var(--ink-dim);
+        padding:5px 9px; cursor:pointer; font-family:var(--cond); font-weight:700;
+        letter-spacing:.05em; font-size:10px; text-transform:uppercase;}
+  .gbtn:hover{color:var(--ink); border-color:rgba(255,255,255,.2);}
+  .gbtn.rec{color:var(--ok);   border-color:rgba(65,214,126,.4); background:rgba(65,214,126,.08);}
+  .gbtn.stop{color:var(--crit); border-color:rgba(255,77,77,.35); background:rgba(255,77,77,.07);}
+  .gstep{display:flex; align-items:center; gap:2px; background:var(--panel-2);
+         border:1px solid var(--edge); border-radius:7px; padding:2px 3px;}
+  .gstep .l{font-family:var(--cond); font-size:9px; letter-spacing:.06em; text-transform:uppercase;
+            color:var(--idle); padding:0 4px;}
+  .gstep button{width:19px; height:19px; padding:0; background:none; border:none; border-radius:5px;
+                color:var(--ink-dim); cursor:pointer; font-size:13px; line-height:1;}
+  .gstep button:hover{color:var(--ink); background:rgba(255,255,255,.08);}
+  /* Группы — рядом друг с другом, сколько влезет по ширине.
+     Ширина колонки зафиксирована по старой ширине панели (392px): с 1fr
+     колонки растягивались на весь экран и группа выходила шириной в две карточки.
+     auto-fit при фиксированном максимуме 392px: пустые колонки схлопываются,
+     поэтому ряд групп центрируется, а сами группы не растягиваются. */
+  #groupsWrap{display:grid; justify-content:center; align-items:start; gap:11px;
+              grid-template-columns:repeat(auto-fit, minmax(min(100%, 340px), 392px));}
+  /* «Без группы» — той же ширины, что и группа, по центру */
+  #ungrouped{max-width:392px; margin-left:auto; margin-right:auto; width:100%;}
+  /* Внутри группы камеры всегда вертикально, одна под другой:
+     плиткой раскладываются сами группы, а не карточки в них. */
+  .grp-body{display:flex; flex-direction:column; gap:11px; min-height:30px; border-radius:10px;}
+  .grp-body.drag-over{outline:1px dashed var(--ok); outline-offset:3px; background:rgba(65,214,126,.05);}
+  .grp-hint{text-align:center; padding:9px; color:var(--idle); font-size:11px;}
+  .card.dragging{opacity:.4;}
+  /* строка выбора группы внутри карточки — запасной путь для тача */
+  .card-grp{display:none; align-items:center; gap:7px; margin-bottom:9px;}
+  .card-grp.show{display:flex;}
+  .card-grp .l{font-family:var(--cond); font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--idle);}
+  .card-grp select{flex:1 1 auto; min-width:0; background:var(--panel-2); color:var(--ink-dim);
+        border:1px solid var(--edge); border-radius:7px; padding:4px 6px; font-family:var(--ui); font-size:11px;}
+  .grp-add{align-self:center; background:var(--panel-2); border:1px dashed var(--edge); border-radius:9px;
+           color:var(--ink-dim); padding:6px 12px; cursor:pointer; font-family:var(--cond); font-weight:700;
+           letter-spacing:.06em; font-size:10px; text-transform:uppercase;}
+  .grp-add:hover{color:var(--ok); border-color:rgba(65,214,126,.45);}
+
+  /* пусто — нет подключённых камер */
+  .empty{display:none; text-align:center; padding:26px 14px; border:1px dashed var(--edge);
+         border-radius:13px; color:var(--ink-dim); font-family:var(--cond); font-weight:600;
+         letter-spacing:.06em; font-size:12px; text-transform:uppercase;}
+  .empty.show{display:block;}
+
+  /* camera cards */
+  .card{background:var(--panel); border:1px solid var(--edge); border-radius:13px; padding:12px 13px;
+        position:relative; overflow:hidden;
+        opacity:0; transform:translateY(8px); animation:in .45s cubic-bezier(.2,.8,.2,1) forwards;}
+  @keyframes in{to{opacity:1;transform:none}}
+  .card::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--idle); transition:.35s;}
+  .card.rec::before{background:var(--crit); box-shadow:0 0 12px var(--crit);}
+
+  .crow{display:flex; align-items:center; justify-content:space-between; margin-bottom:11px;}
+  .cam{font-weight:700; letter-spacing:.05em; font-size:18px; text-transform:uppercase; white-space:nowrap;}
+  .model{font-family:var(--cond); font-weight:600; letter-spacing:.04em; font-size:10px;
+         color:var(--ink-dim); text-transform:uppercase; margin-top:3px;}
+  .cinfo{flex:1; min-width:0;}
+  .ctop{display:flex; align-items:center; gap:12px;}   /* модель · аккумулятор · карта · статус — одной строкой */
+  .ctop .state{margin-left:auto;}                       /* статус STBY/REC — к правому краю */
+  .state{display:flex; align-items:center; gap:6px; font-family:var(--cond); font-weight:700;
+         letter-spacing:.12em; font-size:12px; color:var(--idle);}
+  .state .dot{width:9px;height:9px;border-radius:50%; background:var(--idle);}
+  .card.rec .state{color:var(--crit);}
+  .card.rec .state .dot{background:var(--crit); animation:pulse 1.1s infinite; box-shadow:0 0 9px var(--crit);}
+  /* метрики: остаток на карте */
+  .metrics{display:flex; gap:14px; margin-bottom:11px;}
+  .metric{flex:1; display:flex; align-items:center; gap:10px;}
+  .cap{font-family:var(--cond); font-weight:600; letter-spacing:.08em; font-size:10px;
+       color:var(--ink-dim); text-transform:uppercase;}
+  .val{font-family:var(--mono); font-weight:800; color:var(--ink); line-height:1; font-size:17px;}
+  .val .u{font-size:.62em; font-weight:700; color:var(--ink-dim); margin-left:1px;}
+  /* батарея крупнее + ровный внутренний отступ; молния питания — справа от батареи */
+  .batrow{display:flex; align-items:center; gap:8px;}
+  .battery{position:relative; width:39px; height:20px; flex:none;
+           border:2px solid var(--ink-dim); border-radius:4px;}
+  .battery::after{content:""; position:absolute; right:-5px; top:50%; transform:translateY(-50%); width:3px; height:8px;
+                  background:var(--ink-dim); border-radius:0 2px 2px 0;}
+  .bfill-track{position:absolute; inset:2px; border-radius:2px; overflow:hidden;}
+  .bfill-track .fill{position:absolute; left:0; top:0; bottom:0; width:0%;
+                     background:var(--bat-ok); transition:width .5s, background .4s;}
+  /* молния питания справа: горит при питании от сети, иначе — пустой контур молнии */
+  .batrow .bolt{flex:none; display:flex; align-items:center; justify-content:center; pointer-events:none;}
+  .batrow .bolt svg{width:15px; height:15px;}
+  .batrow .bolt path{fill:none; stroke:rgba(255,255,255,.5); stroke-width:1.6; stroke-linejoin:round;}
+  .card.on-power .batrow .bolt{filter:drop-shadow(0 0 3px rgba(255,194,75,.65));}
+  .card.on-power .batrow .bolt path{fill:var(--warn); stroke:var(--warn);}
+  /* SD-карта (глиф со срезанным углом) */
+  .cardm{display:flex; align-items:center; gap:7px;}   /* карта: иконка + остаток минут в одну строку */
+  .sd{width:18px; height:22px; flex:none; border-radius:2px 2px 3px 3px;
+      background:linear-gradient(180deg,#cfd6dd,#9aa6b2);
+      clip-path:polygon(28% 0,100% 0,100% 100%,0 100%,0 22%);
+      position:relative; box-shadow:inset 0 0 0 1px rgba(0,0,0,.25);}
+  .sd::before{content:""; position:absolute; top:3px; right:2px; width:7px; height:4px;
+              background:rgba(0,0,0,.28); border-radius:1px;}
+  .num-ok{color:var(--ok)!important} .num-warn{color:var(--warn)!important} .num-crit{color:var(--crit)!important}
+
+  .controls{display:flex; gap:10px; align-items:stretch;}
+
+  /* REC button */
+  .rec-btn{flex:0 0 108px; border-radius:9px; cursor:pointer; user-select:none;
+           border:1.5px solid rgba(65,214,126,.5); background:rgba(65,214,126,.08); color:var(--ok);
+           font-family:var(--ui); font-weight:700; letter-spacing:.06em; text-transform:uppercase; font-size:12px;
+           display:flex; align-items:center; justify-content:center; gap:7px; transition:.15s;}
+  .rec-btn:hover{filter:brightness(1.12);}
+  .rec-btn:active{transform:translateY(1px);}
+  .rec-btn .ic{width:9px;height:9px;border-radius:50%;background:var(--ok);}
+  .card.rec .rec-btn{border-color:var(--crit); background:rgba(255,77,77,.12); color:var(--crit);}
+  .card.rec .rec-btn .ic{background:var(--crit);border-radius:50%;}
+  .rec-btn.pending{opacity:.55; pointer-events:none;}
+
+  /* ISO block */
+  /* ISO — одной строкой: подпись слева, степперы справа. Так блок вдвое ниже,
+     а кнопка REC подтягивается за ним (align-items:stretch в .controls). */
+  .iso{flex:1; background:var(--panel-2); border:1px solid var(--edge-2); border-radius:9px;
+       padding:3px 8px; display:flex; flex-direction:row; align-items:center; gap:8px;}
+  .iso-top{flex:none; display:flex; flex-direction:column; align-items:flex-start;
+           justify-content:center; line-height:1.15;}
+  .iso-lab{font-family:var(--cond); font-weight:600; letter-spacing:.1em; font-size:10px; color:var(--ink-dim); text-transform:uppercase;}
+  .iso-eff{font-family:var(--mono); font-weight:700; font-size:10px; color:var(--ink-dim);}
+  .iso-row{flex:1; display:flex; align-items:center; gap:5px; min-width:0;}
+  .step{flex:none; width:23px; height:23px; border-radius:6px; border:1px solid var(--edge);
+        background:#1c222b; color:var(--ink); font-family:var(--mono); font-weight:800; font-size:14px;
+        cursor:pointer; display:flex; align-items:center; justify-content:center; user-select:none;}
+  .step:hover{border-color:rgba(255,255,255,.25);}
+  .step:active{transform:translateY(1px);}
+  .iso-sel,.ctl-sel{flex:1; appearance:none; -webkit-appearance:none; text-align:center;
+           background:#1c222b; border:1px solid var(--edge); border-radius:7px; color:var(--ink);
+           font-family:var(--mono); font-weight:800; font-size:15px; padding:4px 6px; cursor:pointer; width:100%;}
+  .iso-sel{font-size:13px; padding:2px 6px;}    /* только ISO — второй ряд не трогаем */
+  .iso-sel:focus,.ctl-sel:focus{outline:none; border-color:rgba(255,255,255,.3);}
+  .ctl-sel:disabled{opacity:.4; cursor:default;}
+
+  /* второй ряд контролов: диафрагма · выдержка · ББ(K) */
+  .controls2{display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:9px;}
+  .ctl{display:flex; flex-direction:column; gap:4px;}
+  .ctl-lab{font-family:var(--cond); font-weight:600; letter-spacing:.08em; font-size:9px;
+           color:var(--ink-dim); text-transform:uppercase; padding-left:2px;}
+  .ctl-sel{font-size:13px; padding:6px 4px;}
+
+  /* Live Preview — выпадающий раздел с окном 16:9 */
+  .lv{margin-top:11px; border-top:1px solid var(--edge-2); padding-top:9px;}
+  .lv-head{display:flex; align-items:center; justify-content:space-between; cursor:pointer; user-select:none;}
+  .lv-title{font-family:var(--cond); font-weight:700; letter-spacing:.1em; font-size:11px;
+            text-transform:uppercase; color:var(--ink-dim);}
+  .lv-tri{color:var(--ink-dim); font-size:10px; line-height:1; transition:transform .25s ease;}
+  .lv.open .lv-tri{transform:rotate(90deg);}
+  .lv.open .lv-title{color:var(--ink);}
+  .lv-hr{display:flex; align-items:center; gap:11px;}
+  .lv-rot{display:none; align-items:center; justify-content:center; padding:0; line-height:0;
+          background:none; border:none; color:var(--ink-dim); cursor:pointer;}
+  .lv.open .lv-rot{display:inline-flex;}   /* кнопка поворота видна, когда раздел открыт */
+  .lv-rot:hover{color:var(--ink);}
+  .lv-body{overflow:hidden; max-height:0; transition:max-height .3s ease;}
+  .lv.open .lv-body{max-height:820px;}   /* с запасом под портретную ориентацию */
+  .lv-frame{position:relative; margin-top:9px; width:100%;
+            background:#000; border:1px solid var(--edge); overflow:hidden;}
+  .lv-frame:not(.has-img){padding-top:56.25%;}      /* 16:9 плейсхолдер, пока нет кадра */
+  .lv-media{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+            transform-origin:center center; display:none;}  /* размер/поворот задаёт JS */
+  .lv-frame.has-img .lv-media{display:block;}
+  .lv-img{display:block; width:100%; height:100%;}
+  .lv-ov{position:absolute; inset:0; width:100%; height:100%; pointer-events:none;}
+  .lv-ph{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+         font-family:var(--cond); font-weight:600; letter-spacing:.12em; font-size:11px;
+         text-transform:uppercase; color:var(--ink-dim); opacity:.55;}
+  .lv-frame.has-img .lv-ph{display:none;}
+  .lv-fr{display:inline-flex; align-items:center; gap:7px; margin-top:8px; cursor:pointer;
+         font-family:var(--cond); font-weight:600; letter-spacing:.06em; font-size:10px;
+         text-transform:uppercase; color:var(--ink-dim); user-select:none;}
+  .lv-fr input{accent-color:var(--ok); cursor:pointer; margin:0;}
+  .lv-toggles{display:flex; gap:16px; margin-top:8px;}
+  .lv-toggles .lv-fr{margin-top:0;}
+
+  /* обновление программы */
+  .upd{max-width:392px; width:100%; margin-left:auto; margin-right:auto;
+       display:flex; flex-direction:column; gap:6px; padding:2px;}
+  .upd-line{display:flex; align-items:center; justify-content:space-between; gap:8px;}
+  .upd-ver{font-family:var(--cond); font-size:10px; letter-spacing:.06em;
+           text-transform:uppercase; color:var(--idle);}
+  .upd-btn{background:var(--panel-2); border:1px solid var(--edge); border-radius:7px;
+           color:var(--ink-dim); padding:4px 9px; cursor:pointer; font-family:var(--cond);
+           font-weight:700; letter-spacing:.05em; font-size:10px; text-transform:uppercase;}
+  .upd-btn:hover{color:var(--ink); border-color:rgba(255,255,255,.2);}
+  .upd-btn:disabled{opacity:.5; cursor:default;}
+  .upd-btn.go{color:var(--ok); border-color:rgba(65,214,126,.45); background:rgba(65,214,126,.1);}
+  .upd-new{display:none; align-items:center; justify-content:space-between; gap:8px;
+           background:rgba(65,214,126,.07); border:1px solid rgba(65,214,126,.3);
+           border-radius:9px; padding:7px 10px;}
+  .upd-new.show{display:flex;}
+  .upd-new .t{font-size:11px; color:var(--ok);}
+  .upd-auto{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--idle); cursor:pointer;}
+  .upd-auto input{accent-color:var(--ok); cursor:pointer; margin:0;}
+
+  /* добавление камер по IP (когда автопоиск не работает) */
+  .ipbox{background:var(--panel); border:1px solid var(--edge); border-radius:11px; padding:9px 12px;}
+  .ipbox summary{list-style:none; cursor:pointer; display:flex; align-items:center; justify-content:space-between;
+                 font-family:var(--cond); font-weight:600; letter-spacing:.06em; font-size:9px;
+                 text-transform:uppercase; color:var(--ink-dim);}
+  .ipbox summary::-webkit-details-marker{display:none;}
+  .ipbox summary .arw{transition:transform .15s;}
+  .ipbox[open] summary .arw{transform:rotate(90deg);}
+  .ip-hint{font-size:11px; line-height:1.5; color:var(--idle); margin:9px 0 8px;}
+  .ip-form{display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
+  .ip-form input[type=text]{flex:1 1 130px; min-width:0; background:var(--panel-2); color:var(--ink);
+        border:1px solid var(--edge); border-radius:7px; padding:6px 8px; font-family:var(--mono); font-size:12px;}
+  .ip-form select{flex:0 1 auto; background:var(--panel-2); color:var(--ink); border:1px solid var(--edge);
+        border-radius:7px; padding:6px 8px; font-family:var(--ui); font-size:12px;}
+  .ip-add{flex:none; background:rgba(65,214,126,.1); color:var(--ok); border:1px solid rgba(65,214,126,.4);
+        border-radius:7px; padding:6px 12px; cursor:pointer; font-family:var(--cond); font-weight:700;
+        letter-spacing:.06em; font-size:11px; text-transform:uppercase;}
+  .ip-add:disabled{opacity:.5; cursor:default;}
+  .ip-ssh{display:flex; align-items:center; gap:5px; font-size:11px; color:var(--ink-dim); cursor:pointer;}
+  .ip-ssh input{accent-color:var(--ok); cursor:pointer; margin:0;}
+  .ip-list{margin-top:9px; display:flex; flex-direction:column; gap:5px;}
+  .ip-item{display:flex; align-items:center; justify-content:space-between; gap:8px;
+           background:var(--panel-2); border:1px solid var(--edge-2); border-radius:7px; padding:5px 6px 5px 9px;}
+  .ip-item .a{font-family:var(--mono); font-size:12px; color:var(--ink);}
+  .ip-item .m{font-size:11px; color:var(--ink-dim);}
+  .ip-del{flex:none; background:none; border:none; color:var(--idle); cursor:pointer; font-size:15px;
+          line-height:1; padding:2px 6px; border-radius:6px;}
+  .ip-del:hover{color:var(--crit); background:rgba(255,77,77,.1);}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="head">
+    <div class="title">SignalBox</div>
+    <div class="head-r">
+      <button class="icobtn" id="rstBtn" title="Перезагрузка" aria-label="Перезагрузка">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><polyline points="20.5 3.5 20.5 9 15 9"/>
+        </svg>
+      </button>
+      <button class="icobtn off" id="offBtn" title="Выключить" aria-label="Выключить">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3.5v8"/><path d="M6.4 6.9a8 8 0 1 0 11.2 0"/>
+        </svg>
+      </button>
+      <div class="badge" id="badge"><span class="d"></span><span class="t">…</span></div>
+    </div>
+  </div>
+  <button class="grp-add" id="grpAdd">+ Группа</button>
+  <div id="groupsWrap"></div>
+  <!-- камеры вне групп: без заголовка и рамки, просто карточки под группами.
+       Сам контейнер нужен как зона, куда можно перетащить камеру из группы. -->
+  <div class="grp bare" id="ungrouped">
+    <div class="grp-body" id="ungroupedBody" data-body=""></div>
+  </div>
+  <div class="share">
+    <div class="share-txt">
+      <div class="share-cap">Доступ к панели с других устройств</div>
+      <button class="share-url" id="shareUrl" title="Нажми — скопировать адрес">—</button>
+    </div>
+    <div class="share-qr" id="shareQr" title="Нажми — увеличить QR для сканирования"></div>
+  </div>
+  <details class="ipbox" id="ipBox">
+    <summary>Добавить камеру по IP <span class="arw">▸</span></summary>
+    <div class="ip-hint">
+      Нужно, только если камера не появляется сама: сеть не пропускает автопоиск
+      (отдельный SSID 2.4 ГГц, гостевая сеть или изоляция клиентов на роутере).
+      Адрес камеры: Меню → Сеть → Wi-Fi → Отобр. инф. Wi-Fi.
+    </div>
+    <div class="ip-form">
+      <input type="text" id="ipInput" placeholder="192.168.1.55" inputmode="decimal" autocomplete="off">
+      <select id="ipModel"></select>
+      <label class="ip-ssh" title="Отметь, только если на камере включена аутентификация доступа">
+        <input type="checkbox" id="ipSsh">SSH
+      </label>
+      <button class="ip-add" id="ipAdd">Добавить</button>
+    </div>
+    <div class="ip-list" id="ipList"></div>
+  </details>
+  <div class="upd" id="updBox">
+    <div class="upd-new" id="updNew">
+      <span class="t" id="updMsg"></span>
+      <button class="upd-btn go" id="updGo">Обновить</button>
+    </div>
+    <div class="upd-line">
+      <span class="upd-ver" id="updVer">SignalBox</span>
+      <label class="upd-auto" title="Ставить обновления сразу при запуске, без вопросов">
+        <input type="checkbox" id="updAuto">авто
+      </label>
+      <button class="upd-btn" id="updCheck">Проверить</button>
+    </div>
+  </div>
+  <div class="empty" id="empty">Нет подключённых камер</div>
+  <div class="toast" id="toast"></div>
+</div>
+<div class="off-screen" id="offScreen">
+  <div>
+    <div class="off-title">SignalBox выключен</div>
+    <div class="off-hint">Камеры отключены корректно. Эту вкладку можно закрыть.<br>
+      Чтобы включить снова — запусти SignalBox заново.</div>
+  </div>
+</div>
+<div class="qr-modal" id="qrModal">
+  <div class="qr-modal-card">
+    <div class="qr-big" id="qrBig"></div>
+    <div class="qr-big-url" id="qrBigUrl"></div>
+    <div class="qr-big-hint">Нажми, чтобы закрыть</div>
+  </div>
+</div>
+
+<script>
+/* =========================================================================
+   CONFIG
+   ========================================================================= */
+// Базовый адрес сборщика: тот же origin, если страница по http (OBS-док или
+// телефон в той же Wi-Fi), иначе (открыта как файл) — localhost сборщика.
+const LV_BASE = (location.protocol==='http:'||location.protocol==='https:') ? location.origin : 'http://127.0.0.1:8787';
+
+const CONFIG = {
+  statusEndpoint: LV_BASE + "/status.json", // откуда читаем состояние
+  cmdEndpoint:    LV_BASE + "/cmd",          // куда шлём команды (POST)
+  pollMs: 1000,
+
+  // Пороги для цветов метрик
+  battery: { warn: 35, crit: 15 },     // % заряда
+  cardMin: { warn: 30, crit: 10 },     // минут записи на карте
+
+  // Допустимые значения ISO для выпадающего списка (в бою тянутся с камеры).
+  isoValues: ["AUTO",100,160,200,320,400,640,800,1250,1600,2500,3200,5000,6400,12800,25600,51200,102400],
+
+  // Пресеты цветовой температуры (K) для выпадающего списка ББ.
+  kelvinValues: [2500,2700,3000,3200,3500,4000,4200,4500,5000,5600,6000,6500,7000,8000,9900],
+};
+
+const BOLT_SVG = '<svg viewBox="0 0 24 24"><path d="M13 2 L4 14 h6 l-1 8 l9-12 h-6 z"/></svg>';
+const nearestK = k => CONFIG.kelvinValues.reduce((a,b)=>Math.abs(b-k)<Math.abs(a-k)?b:a);
+const clsBat  = b => b<=CONFIG.battery.crit ? 'crit' : b<=CONFIG.battery.warn ? 'warn' : 'ok';
+const clsCard = m => m<=CONFIG.cardMin.crit ? 'crit' : m<=CONFIG.cardMin.warn ? 'warn' : 'ok';
+const fmtMin = m => {
+  if (m==null || m<0) return ['--','мин'];
+  if (m<60) return [String(m),'мин'];
+  return [`${Math.floor(m/60)}ч${String(m%60).padStart(2,'0')}`,'м'];
+};
+// Форматирование значения напрямую из кода (когда камера не дала список опций).
+const fmtAperture = enc => (enc==null || enc===0 || enc>=0xFFFE) ? ''
+                          : (enc%100 ? 'F'+(enc/100).toFixed(1) : 'F'+(enc/100));
+const fmtShutter = enc => {
+  if (enc==null || enc===0xFFFFFFFF) return '';
+  if (enc===0) return 'BULB';
+  const num = enc>>>16, den = enc & 0xFFFF;
+  if (!den) return '';
+  if (num===1) return '1/'+den;
+  if (num%den===0) return (num/den)+'"';
+  return (num/den).toFixed(1)+'"';
+};
+
+/* Красивое имя модели из строки SDK ("ILME-FX30" -> "FX30").
+   ТОЛЬКО точное совпадение: раньше здесь искалась подстрока, и "ILME-FX30"
+   попадал под правило "FX3" — FX30 показывалась как FX3 (и FX3A тоже как FX3).
+   Незнакомую модель честнее показать как есть, чем подменить похожей. */
+const MODEL_NAMES = {
+  'ZV-E1':'ZV-E1', 'ZV-E10M2':'ZV-E10 II',
+  'ILME-FX2':'FX2', 'ILME-FX3':'FX3', 'ILME-FX3A':'FX3A', 'ILME-FX30':'FX30',
+  'ILME-FX6':'FX6', 'ILME-FR7':'FR7',
+  'ILCE-1':'A1', 'ILCE-1M2':'A1 II', 'ILCE-9M2':'A9 II', 'ILCE-9M3':'A9 III',
+  'ILCE-7C':'A7C', 'ILCE-7CM2':'A7C II', 'ILCE-7CR':'A7CR',
+  'ILCE-7M4':'A7 IV', 'ILCE-7M5':'A7 V', 'ILCE-7SM3':'A7S III',
+  'ILCE-7RM4':'A7R IV', 'ILCE-7RM4A':'A7R IVA', 'ILCE-7RM5':'A7R V',
+  'ILCE-6700':'A6700', 'ILX-LR1':'ILX-LR1',
+  'DSC-RX0M2':'RX0 II', 'DSC-RX1RM3':'RX1R III',
+  'PXW-Z200':'Z200', 'PXW-Z300':'Z300', 'PXW-Z380':'Z380',
+  'HXR-NX800':'NX800', 'BRC-AM7':'BRC-AM7', 'MPC-2610':'MPC-2610'
+};
+function modelName(m){
+  const raw = String(m||'').trim();
+  if(!raw) return '—';
+  const hit = MODEL_NAMES[raw.toUpperCase()];
+  if(hit) return hit;
+  return raw.replace(/^(ILME|ILCE|DSC|PXW|HXR)-/i, '') || raw;   // незнакомая — как есть
+}
+
+const ISO_OPTS = CONFIG.isoValues.map(v=>`<option value="${v}">${v==="AUTO"?"АВТО":v}</option>`).join('');
+const KELVIN_OPTS = CONFIG.kelvinValues.map(k=>`<option value="${k}">${k}K</option>`).join('');
+
+/* =========================================================================
+   Динамические карточки — по одной на каждую РЕАЛЬНО подключённую камеру.
+   Ключ — id из status.json ("CAM 1"). Выключенных камер в панели нет.
+   ========================================================================= */
+const app   = document.getElementById('app');
+const empty = document.getElementById('empty');
+const cards = {};   // id -> объект карточки
+
+let live = false;
+
+/* ---------- команды ---------- */
+async function cmd(payload){
+  try{
+    const r = await fetch(CONFIG.cmdEndpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!r.ok) throw 0;
+    // успех: состояние подтянется следующим опросом status.json
+  }catch(_){ /* сборщик недоступен — карточка всё равно уйдёт при следующем опросе */ }
+}
+
+/* ---------- live view (по запросу, ~7 fps) ---------- */
+// Размер/поворот окна под ориентацию: 0/180 — 16:9, 90/270 — портрет во всю ширину.
+function lvApplyRotation(e){
+  const W = e.lvFrame.clientWidth;
+  if(!W) return;
+  const rot = e.lvRot||0;
+  if(W===e.lvApW && rot===e.lvApRot) return;   // без изменений — не дёргаем layout
+  e.lvApW=W; e.lvApRot=rot;
+  const A = 16/9;
+  if(rot===90 || rot===270){
+    const mw = W*A;                       // до поворота: ширина (станет высотой окна)
+    e.lvMedia.style.width  = mw+'px';
+    e.lvMedia.style.height = W+'px';
+    e.lvFrame.style.height = mw+'px';
+  } else {
+    const h = W/A;
+    e.lvMedia.style.width  = W+'px';
+    e.lvMedia.style.height = h+'px';
+    e.lvFrame.style.height = h+'px';
+  }
+  e.lvMedia.style.transform = `translate(-50%,-50%) rotate(${rot}deg)`;
+}
+function lvDraw(e){
+  const frames = e.lvFrames || [];
+  let s='';
+  for(const f of frames){
+    const isEye  = (f.k==='face' || f.k==='track');   // рамка глаза/субъекта
+    const isZone = (f.k==='focus');                   // зона автофокуса
+    if(isEye  && !e.lvCbEye.checked)  continue;
+    if(isZone && !e.lvCbZone.checked) continue;
+    const x=(f.cx-f.w/2)*1000, y=(f.cy-f.h/2)*1000, w=f.w*1000, h=f.h*1000;
+    // Захват: глаз/трек — AF-цель (ty===2); зона — Focused (st===2). Иначе белый.
+    const captured = (isEye && f.ty===2) || (isZone && f.st===2);
+    const col = captured ? '#41d67e' : '#ffffff';
+    s+=`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" fill="none" stroke="${col}" stroke-width="4" rx="10"/>`;
+  }
+  e.lvOv.innerHTML=s;
+}
+async function lvTick(e){
+  try{
+    const r=await fetch(`${LV_BASE}/liveview/${e.camNum}.jpg?t=${Date.now()}`,{cache:'no-store'});
+    if(!r.ok) throw 0;
+    const hdr=r.headers.get('X-Cam-Frames');
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    e.lvImg.src=url;
+    if(e.lvUrl) URL.revokeObjectURL(e.lvUrl);
+    e.lvUrl=url;
+    e.lvFrame.classList.add('has-img');
+    lvApplyRotation(e);
+    let fr=[]; try{ fr=JSON.parse(hdr||'[]'); }catch(_){}
+    e.lvFrames = fr;
+    lvDraw(e);
+  }catch(_){ e.lvFrame.classList.remove('has-img'); }   // 503/нет кадра → плейсхолдер
+}
+function lvStart(e){
+  if(e.lvOn) return;
+  e.lvOn=true;
+  const loop=async()=>{ if(!e.lvOn) return; await lvTick(e); if(e.lvOn) e.lvTimer=setTimeout(loop, 143); };
+  loop();
+}
+function lvStop(e){
+  e.lvOn=false;
+  if(e.lvTimer){ clearTimeout(e.lvTimer); e.lvTimer=null; }
+  if(e.lvUrl){ URL.revokeObjectURL(e.lvUrl); e.lvUrl=null; }
+  e.lvImg.removeAttribute('src');
+  e.lvFrame.classList.remove('has-img');
+  e.lvFrame.style.height='';   // вернуть плейсхолдер 16:9
+  e.lvApW=0;                    // пересчитать размер при повторном открытии
+  e.lvFrames=[];
+  e.lvOv.innerHTML='';
+}
+
+/* ---------- построение карточки ---------- */
+function buildCard(cam){
+  const camNum = parseInt(String(cam.id).replace(/\D/g,''),10);
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="crow">
+      <div class="cinfo">
+        <div class="ctop">
+          <div class="cam">${modelName(cam.model)}</div>
+          <div class="batrow">
+            <div class="battery"><div class="bfill-track"><div class="fill"></div></div></div>
+            <div class="bolt" title="Питание от сети">${BOLT_SVG}</div>
+          </div>
+          <div class="cardm"><div class="sd"></div><div class="val card-val">--<span class="u">мин</span></div></div>
+          <div class="state"><span class="dot"></span><span class="lab">STBY</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="rec-btn"><span class="ic"></span><span class="t">ЗАПИСЬ</span></div>
+      <div class="iso">
+        <div class="iso-top"><span class="iso-lab">ISO</span><span class="iso-eff"></span></div>
+        <div class="iso-row">
+          <div class="step minus">−</div>
+          <select class="iso-sel">${ISO_OPTS}</select>
+          <div class="step plus">+</div>
+        </div>
+      </div>
+    </div>
+    <div class="controls2">
+      <div class="ctl"><span class="ctl-lab">Диафрагма</span><select class="ctl-sel ap-sel"></select></div>
+      <div class="ctl"><span class="ctl-lab">Выдержка</span><select class="ctl-sel sh-sel"></select></div>
+      <div class="ctl"><span class="ctl-lab">ББ, K</span><select class="ctl-sel wb-sel">${KELVIN_OPTS}</select></div>
+    </div>
+    <div class="lv">
+      <div class="lv-head">
+        <span class="lv-title">Live Preview</span>
+        <div class="lv-hr">
+          <button class="lv-rot" title="Повернуть на 90°"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/></svg></button>
+          <span class="lv-tri">▶</span>
+        </div>
+      </div>
+      <div class="lv-body">
+        <div class="lv-frame">
+          <div class="lv-media">
+            <img class="lv-img" alt="">
+            <svg class="lv-ov" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>
+          </div>
+          <div class="lv-ph">Нет сигнала</div>
+        </div>
+        <div class="lv-toggles">
+          <label class="lv-fr"><input type="checkbox" class="lv-cb-eye" checked>Рамка глаза</label>
+          <label class="lv-fr"><input type="checkbox" class="lv-cb-zone" checked>Зона АФ</label>
+        </div>
+      </div>
+    </div>`;
+  app.insertBefore(card, empty);       // карточки идут перед плейсхолдером
+  const e = {
+    id: cam.id, camNum, card,
+    rec: false, iso: 'AUTO',
+    stateLab: card.querySelector('.state .lab'),
+    fill:     card.querySelector('.battery .fill'),
+    cardVal:  card.querySelector('.card-val'),
+    recBtn:   card.querySelector('.rec-btn'),
+    recTxt:   card.querySelector('.rec-btn .t'),
+    isoSel:   card.querySelector('.iso-sel'),
+    isoEffEl: card.querySelector('.iso-eff'),
+    minus:    card.querySelector('.step.minus'),
+    plus:     card.querySelector('.step.plus'),
+    apSel:    card.querySelector('.ap-sel'),
+    shSel:    card.querySelector('.sh-sel'),
+    wbSel:    card.querySelector('.wb-sel'),
+    lvFrame:  card.querySelector('.lv-frame'),
+    lvMedia:  card.querySelector('.lv-media'),
+    lvImg:    card.querySelector('.lv-img'),
+    lvOv:     card.querySelector('.lv-ov'),
+    lvCbEye:  card.querySelector('.lv-cb-eye'),
+    lvCbZone: card.querySelector('.lv-cb-zone'),
+    lvRotBtn: card.querySelector('.lv-rot'),
+    lvRot:    0,
+  };
+  // обработчики
+  e.recBtn.onclick  = ()=>{ e.recBtn.classList.add('pending'); cmd({cam:e.camNum,action:"rec",value:e.rec?"stop":"start"}); };
+  e.isoSel.onchange = ()=>cmd({cam:e.camNum,action:"iso",value:e.isoSel.value});
+  e.minus.onclick   = ()=>stepIso(e,-1);
+  e.plus.onclick    = ()=>stepIso(e,+1);
+  e.apSel.onchange  = ()=>cmd({cam:e.camNum,action:"aperture",value:e.apSel.value});
+  e.shSel.onchange  = ()=>cmd({cam:e.camNum,action:"shutter", value:e.shSel.value});
+  e.wbSel.onchange  = ()=>cmd({cam:e.camNum,action:"wbkelvin",value:e.wbSel.value});
+  card.querySelector('.lv-head').onclick = ()=>{
+    const lv = card.querySelector('.lv');
+    if(lv.classList.toggle('open')) lvStart(e); else lvStop(e);
+  };
+  e.lvCbEye.onchange  = ()=>lvDraw(e);   // перерисовать сразу при переключении
+  e.lvCbZone.onchange = ()=>lvDraw(e);
+  e.lvRotBtn.onclick  = (ev)=>{ ev.stopPropagation(); e.lvRot=(e.lvRot+90)%360; lvApplyRotation(e); };
+  // ---- группы: карточку можно перетащить; селектор — запасной путь для тача ----
+  e.ip = cam.ip || '';
+  card.draggable = true;
+  card.addEventListener('dragstart', ev=>{
+    // не перехватывать перетаскивание, начатое на органах управления
+    if(ev.target.closest('select,input,button,.rec-btn,.step,.lv')){ ev.preventDefault(); return; }
+    if(!e.ip){ ev.preventDefault(); return; }
+    ev.dataTransfer.setData('text/plain', e.ip);
+    ev.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', ()=>card.classList.remove('dragging'));
+  const grpRow = document.createElement('div');
+  grpRow.className = 'card-grp';
+  grpRow.innerHTML = '<span class="l">Группа</span><select></select>';
+  card.querySelector('.controls').before(grpRow);
+  e.grpRow = grpRow;
+  e.grpSel = grpRow.querySelector('select');
+  e.grpSel.onchange = ()=>moveCam(e.ip, e.grpSel.value);
+
+  cards[cam.id] = e;
+  return e;
+}
+
+/* ---------- ISO шаги ---------- */
+function stepIso(e,dir){
+  const vals = CONFIG.isoValues;
+  let idx = vals.findIndex(v=>String(v)===String(e.iso));
+  if(idx<0) idx = vals.indexOf("AUTO");
+  const ni = Math.max(0, Math.min(vals.length-1, idx+dir));
+  cmd({cam:e.camNum,action:"iso",value:String(vals[ni])});
+}
+
+/* ---------- заполнение динамических списков (диафрагма/выдержка) ---------- */
+function fillSelect(sel, opts, cur, fmt){
+  opts = Array.isArray(opts) ? opts : [];
+  if(!opts.length && cur!=null && fmt){ const lbl = fmt(cur); if(lbl) opts = [[cur, lbl]]; }
+  const sig = opts.map(o=>o[0]).join(',');
+  if(sel.dataset.sig !== sig){
+    sel.innerHTML = opts.length
+      ? opts.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join('')
+      : '<option value="">—</option>';
+    sel.dataset.sig = sig;
+  }
+  sel.disabled = opts.length <= 1;
+  const curStr = String(cur);
+  if(sel.value !== curStr) sel.value = curStr;
+}
+
+/* ---------- обновление карточки из данных камеры ---------- */
+function updateCard(e, d){
+  e.last = d;              // последний снимок — из него считаются шаги для группы
+  // IP обязательно обновлять: карточки живут по ключу «CAM N», а он выдаётся
+  // в порядке обнаружения и между запусками может достаться другой камере.
+  // Со старым IP карточка уехала бы в чужую группу.
+  if(d.ip) e.ip = d.ip;
+  e.rec = !!d.rec;
+  e.card.classList.toggle('rec', e.rec);
+  e.card.classList.toggle('on-power', !!d.acPower);
+  e.stateLab.textContent = e.rec ? 'REC' : 'STBY';
+  e.recBtn.classList.remove('pending');
+  e.recTxt.textContent = e.rec ? '● ЗАП' : 'ЗАПИСЬ';
+
+  // заряд — только шкала (проценты убраны), зелёный чуть темнее
+  const b = Math.max(0, Math.min(100, Math.round(d.battery ?? 0)));
+  const bk = clsBat(b);
+  e.fill.style.width = b + '%';
+  e.fill.style.background = bk==='ok' ? 'var(--bat-ok)' : `var(--${bk})`;
+
+  // остаток на карте
+  const m = d.cardMinutes;
+  const mk = (m==null || m<0) ? '' : clsCard(m);
+  const [mv, mu] = fmtMin(m);
+  e.cardVal.firstChild.textContent = mv;
+  e.cardVal.querySelector('.u').textContent = mu;
+  e.cardVal.className = 'val card-val' + (mk ? ' num-'+mk : '');
+
+  // ISO
+  if(d.iso!==undefined){ e.iso = d.iso; const s = String(d.iso); if(e.isoSel.value !== s) e.isoSel.value = s; }
+  e.isoEffEl.textContent = d.iso==="AUTO" ? `эфф. ${d.isoEff ?? ''}` : '';
+
+  // диафрагма / выдержка
+  fillSelect(e.apSel, d.aperture && d.aperture.opts, d.aperture && d.aperture.cur, fmtAperture);
+  fillSelect(e.shSel, d.shutter && d.shutter.opts,  d.shutter && d.shutter.cur,  fmtShutter);
+
+  // ББ в кельвинах — ближайший пресет
+  if(d.wbKelvin!=null){ const k = String(nearestK(d.wbKelvin)); if(e.wbSel.value !== k) e.wbSel.value = k; }
+}
+
+/* =========================================================================
+   ГРУППЫ (съёмочные залы)
+   Раскладка хранится на сервере в groups.json, поэтому док в OBS и телефон
+   видят одно и то же. Принадлежность — по IP камеры: номер «CAM N» выдаётся
+   в порядке обнаружения и между запусками меняется.
+   ========================================================================= */
+let groups = [];
+/* Свёрнутые группы храним ЛОКАЛЬНО в браузере, а не в groups.json: у каждого
+   оператора свой телефон и свой зал — свернув чужие залы у себя, он не должен
+   схлопывать их в доке OBS и у соседей. */
+const COLLAPSE_KEY = 'signalbox.collapsedGroups';
+let collapsedGroups = new Set();
+try { collapsedGroups = new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]')); } catch(_){}
+function saveCollapsed(){
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedGroups])); } catch(_){}
+}
+const groupsWrap    = document.getElementById('groupsWrap');
+const ungroupedBody = document.getElementById('ungroupedBody');
+const hesc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const newGid = () => 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2,5);
+const gidOf  = ip => { const g = groups.find(g => g.cams.includes(ip)); return g ? g.id : ''; };
+
+async function loadGroups(){
+  try{
+    const r = await fetch(`${LV_BASE}/groups.json`,{cache:'no-store'});
+    const d = await r.json();
+    groups = (Array.isArray(d.groups) ? d.groups : []).filter(g => g && g.id).map(g => ({
+      id: String(g.id), name: String(g.name || 'Зал'),
+      cams: Array.isArray(g.cams) ? g.cams.map(String) : []
+    }));
+  }catch(_){ groups = []; }
+  renderGroups(); placeCards();
+}
+
+let grpSaveT = null;
+function saveGroups(){
+  clearTimeout(grpSaveT);
+  grpSaveT = setTimeout(()=>{
+    fetch(`${LV_BASE}/groups/save`,{method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({groups})}).catch(()=>{});
+  }, 300);
+}
+
+function addGroup(){
+  groups.push({id:newGid(), name:'Зал ' + (groups.length + 1), cams:[]});
+  saveGroups(); renderGroups(); placeCards();
+}
+function removeGroup(id){          // камеры не теряются — уезжают в «Без группы»
+  groups = groups.filter(g => g.id !== id);
+  saveGroups(); renderGroups(); placeCards();
+}
+function moveCam(ip, gid){
+  if(!ip) return;
+  groups.forEach(g => { g.cams = g.cams.filter(x => x !== ip); });
+  const g = groups.find(x => x.id === gid);
+  if(g) g.cams.push(ip);
+  saveGroups(); renderGroups(); placeCards();
+}
+
+const groupCards     = g => Object.values(cards).filter(e => g.cams.includes(e.ip));
+const groupOnlineIps = g => groupCards(g).map(e => e.ip);
+
+/* Запись на группу — ОДНИМ запросом со списком камер, чтобы старт пришёлся
+   на один проход, а не растянулся на несколько HTTP-вызовов подряд. */
+async function groupRec(g, start){
+  const ips = groupOnlineIps(g);
+  if(!ips.length){ showToast('В группе нет подключённых камер'); return; }
+  try{
+    await fetch(`${LV_BASE}/cmd`,{method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({cams: ips, action:'rec', value: start ? 'start' : 'stop'})});
+    showToast((start ? 'Запись · ' : 'Стоп · ') + ips.length);
+  }catch(_){ showToast('Сборщик не отвечает'); }
+}
+
+/* Шаг считается для КАЖДОЙ камеры от её собственного значения (у них разные
+   текущие настройки и разные списки), поэтому здесь уходит по команде на камеру. */
+function nextFromList(list, cur, dir){
+  const i = list.indexOf(String(cur));
+  if(i < 0) return null;
+  const n = Math.min(list.length - 1, Math.max(0, i + dir));
+  return n === i ? null : list[n];
+}
+function nextFromOpts(opts, cur, dir){
+  if(!Array.isArray(opts) || opts.length < 2) return null;
+  return nextFromList(opts.map(o => String(o[0])), cur, dir);
+}
+
+async function groupStep(g, what, dir){
+  const list = groupCards(g).filter(e => e.last);
+  if(!list.length){ showToast('В группе нет подключённых камер'); return; }
+  const jobs = [];
+  for(const e of list){
+    const d = e.last;
+    let action = null, value = null;
+    if(what === 'iso'){
+      action = 'iso';  value = nextFromList(CONFIG.isoValues.map(String), d.iso, dir);
+    }else if(what === 'aperture'){
+      action = 'aperture'; value = nextFromOpts(d.aperture && d.aperture.opts, d.aperture && d.aperture.cur, dir);
+    }else if(what === 'shutter'){
+      action = 'shutter';  value = nextFromOpts(d.shutter && d.shutter.opts, d.shutter && d.shutter.cur, dir);
+    }else if(what === 'wb'){
+      action = 'wbkelvin';
+      const cur = (d.wbKelvin != null && d.wbKelvin > 0) ? nearestK(d.wbKelvin) : null;
+      value = cur == null ? null : nextFromList(CONFIG.kelvinValues.map(String), cur, dir);
+    }
+    if(action && value != null) jobs.push(cmd({cam:e.camNum, action, value}));
+  }
+  if(!jobs.length){ showToast('Менять нечего — крайнее значение'); return; }
+  await Promise.all(jobs);
+}
+
+function wireDropZone(body){
+  body.addEventListener('dragover', ev=>{
+    ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; body.classList.add('drag-over');
+  });
+  body.addEventListener('dragleave', ()=>body.classList.remove('drag-over'));
+  body.addEventListener('drop', ev=>{
+    ev.preventDefault(); body.classList.remove('drag-over');
+    const ip = ev.dataTransfer.getData('text/plain');
+    if(ip) moveCam(ip, body.dataset.body || '');
+  });
+}
+
+function renderGroups(){
+  groupsWrap.innerHTML = '';
+  groups.forEach(g=>{
+    const el = document.createElement('div');
+    el.className = 'grp';
+    el.dataset.gid = g.id;
+    el.innerHTML =
+      `<div class="grp-head">
+         <button class="grp-tri" title="Свернуть / развернуть группу">▼</button>
+         <input class="grp-name" value="${hesc(g.name)}" maxlength="40" spellcheck="false" title="Название группы">
+         <div class="grp-rec" title="Горит, когда пишут все камеры группы"><span class="d"></span>REC</div>
+         <button class="gbtn rec" title="Начать запись на всех камерах группы">Запись</button>
+         <button class="gbtn stop" title="Остановить запись на всех камерах группы">Стоп</button>
+         <div class="grp-count"></div>
+         <button class="grp-del" title="Удалить группу">✕</button>
+       </div>
+       <div class="grp-ctl">
+         <div class="gstep"><button data-s="iso" data-d="-1">−</button><span class="l">ISO</span><button data-s="iso" data-d="1">+</button></div>
+         <div class="gstep"><button data-s="aperture" data-d="-1">−</button><span class="l">Диафр.</span><button data-s="aperture" data-d="1">+</button></div>
+         <div class="gstep"><button data-s="shutter" data-d="-1">−</button><span class="l">Выдержка</span><button data-s="shutter" data-d="1">+</button></div>
+         <div class="gstep"><button data-s="wb" data-d="-1">−</button><span class="l">ББ</span><button data-s="wb" data-d="1">+</button></div>
+       </div>
+       <div class="grp-body" data-body="${hesc(g.id)}"></div>`;
+    const nameInput = el.querySelector('.grp-name');
+    nameInput.onchange  = ()=>{ g.name = nameInput.value.trim() || 'Зал'; nameInput.value = g.name; saveGroups(); };
+    nameInput.onkeydown = ev=>{ if(ev.key === 'Enter') nameInput.blur(); };
+    el.querySelector('.grp-del').onclick   = ()=>removeGroup(g.id);
+    el.querySelector('.gbtn.rec').onclick  = ()=>groupRec(g, true);
+    el.querySelector('.gbtn.stop').onclick = ()=>groupRec(g, false);
+    el.querySelectorAll('.gstep button').forEach(b=>{
+      b.onclick = ()=>groupStep(g, b.dataset.s, parseInt(b.dataset.d, 10));
+    });
+    el.classList.toggle('collapsed', collapsedGroups.has(g.id));
+    el.querySelector('.grp-tri').onclick = ()=>{
+      const nowCollapsed = !el.classList.contains('collapsed');
+      el.classList.toggle('collapsed', nowCollapsed);
+      if(nowCollapsed) collapsedGroups.add(g.id); else collapsedGroups.delete(g.id);
+      saveCollapsed();
+    };
+    wireDropZone(el.querySelector('.grp-body'));
+    groupsWrap.appendChild(el);
+  });
+}
+
+function placeCards(){
+  const sig = groups.map(g => g.id + ':' + g.name).join('|');
+  Object.values(cards).forEach(e=>{
+    const gid  = gidOf(e.ip);
+    const host = gid ? groupsWrap.querySelector(`.grp-body[data-body="${gid}"]`) : ungroupedBody;
+    if(host && e.card.parentNode !== host) host.appendChild(e.card);
+    if(e.grpSel){
+      if(e.grpSel.dataset.sig !== sig){
+        e.grpSel.innerHTML = '<option value="">Без группы</option>' +
+          groups.map(g=>`<option value="${hesc(g.id)}">${hesc(g.name)}</option>`).join('');
+        e.grpSel.dataset.sig = sig;
+      }
+      e.grpSel.value = gid;
+      e.grpRow.classList.toggle('show', groups.length > 0);
+    }
+  });
+  // счётчики и подсказка в пустой группе
+  groups.forEach(g=>{
+    const wrap = groupsWrap.querySelector(`.grp[data-gid="${g.id}"]`);
+    if(!wrap) return;
+    const body = wrap.querySelector('.grp-body');
+    const n = body.querySelectorAll('.card').length;
+    wrap.querySelector('.grp-count').textContent = n ? n + ' кам.' : '';
+    // REC группы: горит, только когда пишут ВСЕ подключённые камеры группы.
+    // Пустая группа не считается пишущей.
+    const cs = groupCards(g);
+    wrap.querySelector('.grp-rec').classList.toggle('on', cs.length > 0 && cs.every(e => e.rec));
+    let hint = body.querySelector('.grp-hint');
+    if(!n && !hint){
+      hint = document.createElement('div');
+      hint.className = 'grp-hint';
+      hint.textContent = 'Перетащи сюда карточку камеры';
+      body.appendChild(hint);
+    } else if(n && hint){ hint.remove(); }
+  });
+}
+
+document.getElementById('grpAdd').onclick = addGroup;
+wireDropZone(ungroupedBody);
+loadGroups();
+
+/* ---------- синхронизация набора карточек ---------- */
+function sync(onlineCams){
+  const seen = new Set();
+  onlineCams.forEach(cam=>{
+    seen.add(cam.id);
+    const e = cards[cam.id] || buildCard(cam);
+    updateCard(e, cam);
+  });
+  // убрать карточки камер, которых больше нет онлайн
+  for(const id in cards){
+    if(!seen.has(id)){ cards[id].card.remove(); delete cards[id]; }
+  }
+  placeCards();                       // разложить карточки по группам
+  const count = Object.keys(cards).length;
+  empty.classList.toggle('show', count===0);
+  empty.textContent = live ? 'Нет подключённых камер' : 'SignalBox не запущен';
+}
+
+
+/* ---------- перезапуск сборщика (2 клика: «Точно?» → перезапуск) ---------- */
+(function(){
+  const btn = document.getElementById('rstBtn');
+  const ICON = btn.innerHTML;
+  let armed=false, t=null;
+  btn.onclick = ()=>{
+    if(armed){
+      armed=false; clearTimeout(t); btn.classList.remove('arm'); btn.innerHTML='…';
+      fetch(`${LV_BASE}/restart`,{method:'POST'}).catch(()=>{});
+      setTimeout(()=>{ btn.innerHTML=ICON; }, 5000);   // сборщик поднимется — вернуть иконку
+    } else {
+      armed=true; btn.classList.add('arm'); btn.innerHTML='?';   // кнопка квадратная — только знак
+      t=setTimeout(()=>{ armed=false; btn.classList.remove('arm'); btn.innerHTML=ICON; }, 2500);
+    }
+  };
+})();
+
+/* ---------- выключение сборщика (2 клика: «Точно?» → выключение) ----------
+   Шлёт POST /shutdown — тот же чистый путь, что раньше давал q+Enter:
+   сборщик корректно отключает камеры и выходит (иначе камера залипает с 0x820A). */
+let shuttingDown = false;
+(function(){
+  const btn = document.getElementById('offBtn');
+  const ICON = btn.innerHTML;
+  let armed=false, t=null;
+  btn.onclick = ()=>{
+    if(armed){
+      armed=false; clearTimeout(t); btn.classList.remove('arm');
+      shuttingDown = true;                 // опрос молчит: «нет связи» тут ожидаемо
+      btn.innerHTML='…';
+      fetch(`${LV_BASE}/shutdown`,{method:'POST'}).catch(()=>{});
+      setTimeout(()=>document.getElementById('offScreen').classList.add('show'), 500);
+    } else {
+      armed=true; btn.classList.add('arm'); btn.innerHTML='?';
+      t=setTimeout(()=>{ armed=false; btn.classList.remove('arm'); btn.innerHTML=ICON; }, 2500);
+    }
+  };
+})();
+
+/* ---------- QR-код ----------
+   Раньше здесь был самописный генератор. Он строил матрицу, которую телефоны не
+   читали, а мои проверки этого не ловили: я декодировал собственным кодом с теми
+   же предположениями, поэтому и round-trip, и контрольные суммы сходились.
+   Теперь — библиотека qrcode-generator (MIT), файл www/qrcode.js лежит локально,
+   никаких обращений в интернет. */
+function qrToSvg(text){
+  const q = qrcode(0, 'M');        // 0 = версия подбирается сама, M = уровень коррекции
+  q.addData(text);
+  q.make();
+  const n = q.getModuleCount(), quiet = 4, T = n + quiet * 2;
+  let rects = '';
+  for(let r = 0; r < n; r++)
+    for(let c = 0; c < n; c++)
+      if(q.isDark(r, c)) rects += `<rect x="${c+quiet}" y="${r+quiet}" width="1" height="1"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${T} ${T}" shape-rendering="crispEdges">` +
+         `<rect width="${T}" height="${T}" fill="#fff"/><g fill="#000">${rects}</g></svg>`;
+}
+
+/* ---------- шаринг адреса: клик — копировать, QR ---------- */
+let shareUrl='';
+function setShareUrl(url){
+  if(!url || url===shareUrl) return;
+  shareUrl=url;
+  document.getElementById('shareUrl').textContent=url;
+  try{ document.getElementById('shareQr').innerHTML=qrToSvg(url); }catch(_){ document.getElementById('shareQr').innerHTML=''; }
+}
+let toastT=null;
+function showToast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),1600); }
+function fallbackCopy(text,cb){ const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.focus(); ta.select(); try{ document.execCommand('copy'); cb&&cb(); }catch(_){} document.body.removeChild(ta); }
+function copyShare(){
+  if(!shareUrl) return;
+  const done=()=>showToast('Адрес скопирован');
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(shareUrl).then(done).catch(()=>fallbackCopy(shareUrl,done));
+  else fallbackCopy(shareUrl,done);
+}
+document.getElementById('shareUrl').onclick=copyShare;
+/* клик по QR — крупный оверлей для сканирования (iPhone берёт мгновенно) */
+(function(){
+  const qm=document.getElementById('qrModal');
+  document.getElementById('shareQr').onclick=()=>{
+    if(!shareUrl) return;
+    document.getElementById('qrBig').innerHTML=qrToSvg(shareUrl);
+    document.getElementById('qrBigUrl').textContent=shareUrl;
+    qm.classList.add('show');
+  };
+  qm.onclick=()=>qm.classList.remove('show');
+})();
+
+/* ---------- камеры по IP (когда сеть не пропускает автопоиск) ----------
+   Список хранится в cameras.txt рядом с программой — панель его только
+   редактирует, так что записи переживают перезапуск. */
+(function(){
+  const box   = document.getElementById('ipBox');
+  const input = document.getElementById('ipInput');
+  const sel   = document.getElementById('ipModel');
+  const ssh   = document.getElementById('ipSsh');
+  const btn   = document.getElementById('ipAdd');
+  const list  = document.getElementById('ipList');
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  let modelsLoaded = false;
+
+  async function refresh(){
+    try{
+      const r = await fetch(`${LV_BASE}/cameras.json`,{cache:'no-store'});
+      if(!r.ok) throw 0;
+      const d = await r.json();
+      if(!modelsLoaded && d.models && d.models.length){
+        sel.innerHTML = d.models.map(m=>`<option value="${esc(m.token)}">${esc(m.label)}</option>`).join('');
+        modelsLoaded = true;
+      }
+      const items = d.manual || [];
+      list.innerHTML = items.map(e =>
+        `<div class="ip-item"><span><span class="a">${esc(e.ip)}</span> `+
+        `<span class="m">${esc(e.model)}${e.ssh?' · SSH':''}</span></span>`+
+        `<button class="ip-del" data-ip="${esc(e.ip)}" title="Убрать из списка">✕</button></div>`).join('');
+      list.querySelectorAll('.ip-del').forEach(b => b.onclick = () => remove(b.dataset.ip));
+    }catch(_){ /* сборщик недоступен — покажем при следующем открытии */ }
+  }
+
+  async function post(path, payload){
+    const r = await fetch(`${LV_BASE}${path}`,{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    return r.json().catch(()=>({ok:false,error:'Непонятный ответ сборщика'}));
+  }
+
+  async function add(){
+    const ip = input.value.trim();
+    if(!ip){ input.focus(); return; }
+    btn.disabled = true;
+    try{
+      const d = await post('/cameras/add', {ip, model: sel.value, ssh: ssh.checked});
+      if(d.ok){ input.value=''; ssh.checked=false; showToast('Камера добавлена'); refresh(); }
+      else showToast(d.error || 'Не удалось добавить');
+    }catch(_){ showToast('Сборщик не отвечает'); }
+    btn.disabled = false;
+  }
+
+  async function remove(ip){
+    try{
+      const d = await post('/cameras/remove', {ip});
+      // Сессия живёт до перезапуска — сама карточка исчезнет только после него.
+      if(d.ok){ showToast('Убрано из списка'); refresh(); }
+      else showToast(d.error || 'Не удалось убрать');
+    }catch(_){ showToast('Сборщик не отвечает'); }
+  }
+
+  btn.onclick = add;
+  input.addEventListener('keydown', e => { if(e.key === 'Enter') add(); });
+  box.addEventListener('toggle', () => { if(box.open) refresh(); });
+  refresh();
+})();
+
+/* ---------- обновление программы ----------
+   Версия и проверка живут на сервере; панель только показывает и нажимает.
+   Если репозиторий не настроен или нет интернета — блок молча остаётся тихим. */
+(function(){
+  const nw    = document.getElementById('updNew');
+  const msg   = document.getElementById('updMsg');
+  const go    = document.getElementById('updGo');
+  const ver   = document.getElementById('updVer');
+  const auto  = document.getElementById('updAuto');
+  const check = document.getElementById('updCheck');
+  let installing = false;
+
+  async function refresh(){
+    try{
+      const d = await (await fetch(`${LV_BASE}/update.json`,{cache:'no-store'})).json();
+      let line = 'SignalBox ' + (d.current || '');
+      auto.checked   = !!d.auto;
+      check.disabled = !!d.busy || !d.configured;
+      auto.disabled  = !d.configured;
+      if(!d.configured){
+        nw.classList.remove('show');
+        ver.textContent = line + ' · обновления не настроены';
+        return;
+      }
+      if(d.error) line += ' · ' + d.error;
+      ver.textContent = line;
+      if(installing) return;                      // идёт установка — плашку не трогаем
+      if(d.available){
+        msg.textContent = 'Доступна версия ' + d.latest;
+        nw.classList.add('show');
+      } else {
+        nw.classList.remove('show');
+      }
+    }catch(_){ /* сервер недоступен — молчим */ }
+  }
+
+  check.onclick = async ()=>{
+    check.disabled = true;
+    try{ await fetch(`${LV_BASE}/update/check`,{method:'POST'}); }catch(_){}
+    setTimeout(()=>{ refresh(); }, 2500);
+  };
+
+  go.onclick = async ()=>{
+    installing = true;
+    go.disabled = true;
+    msg.textContent = 'Качаю и ставлю обновление…';
+    showToast('Программа перезапустится сама');
+    try{ await fetch(`${LV_BASE}/update/install`,{method:'POST'}); }catch(_){}
+    // сборщик выключится и поднимется уже обновлённым — ждём и перечитываем страницу
+    setTimeout(()=>location.reload(), 15000);
+  };
+
+  auto.onchange = async ()=>{
+    try{
+      await fetch(`${LV_BASE}/update/settings`,{method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({auto: auto.checked})});
+      showToast(auto.checked ? 'Автообновление включено' : 'Автообновление выключено');
+    }catch(_){ showToast('Сборщик не отвечает'); }
+  };
+
+  refresh();
+  setInterval(refresh, 20000);
+})();
+
+/* ---------- опрос состояния ---------- */
+function setBadge(){
+  const b = document.getElementById('badge');
+  b.className = 'badge ' + (live?'live':'demo');
+  b.querySelector('.t').textContent = live ? 'live' : 'нет связи';
+}
+async function poll(){
+  if(shuttingDown) return;     // сборщик выключается — не мигать «нет связи»
+  try{
+    const r = await fetch(CONFIG.statusEndpoint,{cache:'no-store'});
+    if(!r.ok) throw 0;
+    const data = await r.json();
+    live = true; setBadge();
+    setShareUrl(data.server || (/^https?:/.test(location.protocol) ? location.origin+'/' : ''));
+    const online = (data.cameras||[]).filter(c => c.online !== false);
+    sync(online);
+  }catch(_){
+    live = false; setBadge();
+    sync([]);   // сборщик недоступен → карточек нет
+  }
+}
+poll();
+setInterval(poll, CONFIG.pollMs);
+</script>
+</body>
+</html>
