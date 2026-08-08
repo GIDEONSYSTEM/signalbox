@@ -485,7 +485,7 @@ static void maybeOfferFirewallRules() {
 static bool        jsonGet(const std::string&, const std::string&, std::string&);   // определены ниже
 static std::string jsonEscape(const std::string&);
 
-static const char*    kAppVersion = "1.0.0";
+static const char*    kAppVersion = "1.0.1";
 // ЗАПОЛНИТЬ после создания репозитория, формат "владелец/репозиторий".
 // Пустая строка = проверка обновлений выключена.
 static const wchar_t* kUpdateRepo = L"GIDEONSYSTEM/signalbox";
