@@ -238,7 +238,7 @@
   .controls{display:flex; gap:10px; align-items:stretch;}
 
   /* REC button */
-  .rec-btn{flex:0 0 108px; border-radius:9px; cursor:pointer; user-select:none;
+  .rec-btn{flex:0 0 84px; border-radius:9px; cursor:pointer; user-select:none;
            border:1.5px solid rgba(65,214,126,.5); background:rgba(65,214,126,.08); color:var(--ok);
            font-family:var(--ui); font-weight:700; letter-spacing:.06em; text-transform:uppercase; font-size:12px;
            display:flex; align-items:center; justify-content:center; gap:7px; transition:.15s;}
@@ -252,8 +252,11 @@
   /* ISO block */
   /* ISO — одной строкой: подпись слева, степперы справа. Так блок вдвое ниже,
      а кнопка REC подтягивается за ним (align-items:stretch в .controls). */
-  .iso{flex:1; background:var(--panel-2); border:1px solid var(--edge-2); border-radius:9px;
+  /* ISO — по ширине содержимого (влезает самое длинное значение), Mic Gain занимает остаток */
+  .iso, .mic{background:var(--panel-2); border:1px solid var(--edge-2); border-radius:9px;
        padding:3px 8px; display:flex; flex-direction:row; align-items:center; gap:8px;}
+  .iso{flex:0 0 auto;}
+  .mic{flex:1 1 auto; min-width:0;}
   .iso-top{flex:none; display:flex; flex-direction:column; align-items:flex-start;
            justify-content:center; line-height:1.15;}
   .iso-lab{font-family:var(--cond); font-weight:600; letter-spacing:.1em; font-size:10px; color:var(--ink-dim); text-transform:uppercase;}
@@ -267,7 +270,10 @@
   .iso-sel,.ctl-sel{flex:1; appearance:none; -webkit-appearance:none; text-align:center;
            background:#1c222b; border:1px solid var(--edge); border-radius:7px; color:var(--ink);
            font-family:var(--mono); font-weight:800; font-size:15px; padding:4px 6px; cursor:pointer; width:100%;}
-  .iso-sel{font-size:13px; padding:2px 6px;}    /* только ISO — второй ряд не трогаем */
+  /* только ISO — второй ряд не трогаем. width:auto → селектор шириной под самое
+     длинное значение, а не на всю строку */
+  .iso-sel{font-size:13px; padding:2px 6px; flex:0 0 auto; width:auto;}
+  .mic-sel{font-size:13px; padding:2px 6px;}
   .iso-sel:focus,.ctl-sel:focus{outline:none; border-color:rgba(255,255,255,.3);}
   .ctl-sel:disabled{opacity:.4; cursor:default;}
 
@@ -743,6 +749,10 @@ function buildCard(cam){
           <div class="step plus">+</div>
         </div>
       </div>
+      <div class="mic">
+        <div class="iso-top"><span class="iso-lab">Mic Gain</span></div>
+        <div class="iso-row"><select class="ctl-sel mic-sel"></select></div>
+      </div>
     </div>
     <div class="controls2">
       <div class="ctl"><span class="ctl-lab">Диафрагма</span><select class="ctl-sel ap-sel"></select></div>
@@ -781,6 +791,8 @@ function buildCard(cam){
     recBtn:   card.querySelector('.rec-btn'),
     recTxt:   card.querySelector('.rec-btn .t'),
     isoSel:   card.querySelector('.iso-sel'),
+    micBox:   card.querySelector('.mic'),
+    micSel:   card.querySelector('.mic-sel'),
     isoEffEl: card.querySelector('.iso-eff'),
     minus:    card.querySelector('.step.minus'),
     plus:     card.querySelector('.step.plus'),
@@ -804,6 +816,7 @@ function buildCard(cam){
   e.apSel.onchange  = ()=>cmd({cam:e.camNum,action:"aperture",value:e.apSel.value});
   e.shSel.onchange  = ()=>cmd({cam:e.camNum,action:"shutter", value:e.shSel.value});
   e.wbSel.onchange  = ()=>cmd({cam:e.camNum,action:"wbkelvin",value:e.wbSel.value});
+  e.micSel.onchange = ()=>cmd({cam:e.camNum,action:"micgain", value:e.micSel.value});
   card.querySelector('.lv-head').onclick = ()=>{
     const lv = card.querySelector('.lv');
     if(lv.classList.toggle('open')) lvStart(e); else lvStop(e);
@@ -895,6 +908,11 @@ function updateCard(e, d){
   // диафрагма / выдержка
   fillSelect(e.apSel, d.aperture && d.aperture.opts, d.aperture && d.aperture.cur, fmtAperture);
   fillSelect(e.shSel, d.shutter && d.shutter.opts,  d.shutter && d.shutter.cur,  fmtShutter);
+
+  // уровень микрофона: показываем, только если камера его отдаёт
+  const mg = d.micGain && Array.isArray(d.micGain.opts) ? d.micGain.opts : [];
+  e.micBox.style.display = mg.length ? '' : 'none';
+  if(mg.length) fillSelect(e.micSel, mg, d.micGain.cur, null);
 
   // ББ в кельвинах — ближайший пресет
   if(d.wbKelvin!=null){ const k = String(nearestK(d.wbKelvin)); if(e.wbSel.value !== k) e.wbSel.value = k; }

@@ -488,7 +488,7 @@ static void maybeOfferFirewallRules() {
 static bool        jsonGet(const std::string&, const std::string&, std::string&);   // определены ниже
 static std::string jsonEscape(const std::string&);
 
-static const char*    kAppVersion = "1.0.4";
+static const char*    kAppVersion = "1.0.5";
 // ЗАПОЛНИТЬ после создания репозитория, формат "владелец/репозиторий".
 // Пустая строка = проверка обновлений выключена.
 static const wchar_t* kUpdateRepo = L"GIDEONSYSTEM/signalbox";
@@ -1052,7 +1052,8 @@ static std::string buildStatusJson() {
         j += "\"aperture\":" + propOptsJson(s.aperture) + ",";
         j += "\"shutter\":"  + propOptsJson(s.shutter) + ",";
         j += "\"wb\":"       + propOptsJson(s.wb) + ",";
-        j += "\"wbKelvin\":" + (s.wbKelvin < 0 ? std::string("null") : std::to_string(s.wbKelvin));
+        j += "\"wbKelvin\":" + (s.wbKelvin < 0 ? std::string("null") : std::to_string(s.wbKelvin)) + ",";
+        j += "\"micGain\":"  + propOptsJson(s.micGain);
         j += "}";
     }
     j += "]}";
@@ -1740,12 +1741,13 @@ static coll::HttpResponse handleCmd(const std::string& body) {
         else if (action == "shutter")   ok = c->setShutter(value);
         else if (action == "wb")        ok = c->setWb(value);
         else if (action == "wbkelvin")  ok = c->setWbKelvin(value);
+        else if (action == "micgain")   ok = c->setMicGain(value);
         if (ok) ++okCount;
     }
 
     if (action != "rec" && action != "iso" &&
         action != "aperture" && action != "shutter" && action != "wb" &&
-        action != "wbkelvin") {
+        action != "wbkelvin" && action != "micgain") {
         r.status = 400; r.statusText = "Bad Request";
         r.body = "{\"ok\":false,\"error\":\"unknown action\"}";
         return r;

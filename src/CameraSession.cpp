@@ -273,6 +273,7 @@ CamStatus CameraSession::readStatusLocked() {
         SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterSpeed,
         SDK::CrDevicePropertyCode::CrDeviceProperty_WhiteBalance,
         SDK::CrDevicePropertyCode::CrDeviceProperty_Colortemp,
+        SDK::CrDevicePropertyCode::CrDeviceProperty_AudioInputMasterLevel,
     };
     const CrInt32u nCodes = sizeof(codes) / sizeof(codes[0]);
 
@@ -355,6 +356,21 @@ CamStatus CameraSession::readStatusLocked() {
                 // 0x0000 = ниже min, 0xFFFF = выше max — оба отсекаются диапазоном.
                 std::uint32_t k = static_cast<std::uint32_t>(val);
                 if (k >= 1000 && k <= 50000) s.wbKelvin = static_cast<int>(k);
+                break;
+            }
+            case SDK::CrDevicePropertyCode::CrDeviceProperty_AudioInputMasterLevel: {
+                // Уровень записи микрофона. Диапазон приходит как [min, max, шаг];
+                // варианты строим сами — камера отдаёт границы, а не список.
+                s.micGain.cur = static_cast<long long>(static_cast<std::uint16_t>(val));
+                const auto* arr = reinterpret_cast<const std::uint16_t*>(props[i].GetValues());
+                const CrInt32u cnt = arr ? props[i].GetValueSize() / sizeof(std::uint16_t) : 0;
+                if (cnt >= 3) {
+                    const int lo = arr[0], hi = arr[1];
+                    const int step = arr[2] > 0 ? arr[2] : 1;
+                    if (hi > lo && hi - lo <= 256)
+                        for (int v = lo; v <= hi; v += step)
+                            s.micGain.opts.push_back({ v, std::to_string(v) });
+                }
                 break;
             }
             default: break;
@@ -457,6 +473,12 @@ bool CameraSession::setShutter(const std::string& enc) {
 bool CameraSession::setWb(const std::string& enc) {
     return setEncoded(SDK::CrDevicePropertyCode::CrDeviceProperty_WhiteBalance, enc,
                       SDK::CrDataType::CrDataType_UInt16Array);
+}
+// Уровень записи микрофона. У ZV-E1 это диапазон 0..31 (проверено на живой камере),
+// у других моделей границы свои — поэтому значение просто передаём как есть.
+bool CameraSession::setMicGain(const std::string& value) {
+    return setEncoded(SDK::CrDevicePropertyCode::CrDeviceProperty_AudioInputMasterLevel, value,
+                      SDK::CrDataType::CrDataType_UInt16);
 }
 
 // Set white balance by colour temperature (Kelvin). The K value only takes

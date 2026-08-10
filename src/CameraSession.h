@@ -35,6 +35,7 @@ struct CamStatus {
     CamPropOpts shutter;            // ShutterSpeed (hi=num, lo=den)
     CamPropOpts wb;                 // WhiteBalance (mode enum)
     int         wbKelvin    = -1;   // текущая цвет. температура ББ, K (-1 = недоступно)
+    CamPropOpts micGain;            // уровень записи микрофона (AudioInputMasterLevel, 0..31)
 };
 
 class CameraSession : public SCRSDK::IDeviceCallback {
@@ -72,6 +73,7 @@ public:
     // Query live status from the camera (safe to call from poll thread).
     CamStatus readStatus();
 
+
     // Commands (called from HTTP thread). Return true if the command was issued.
     bool setIso(const std::string& value);   // "AUTO" or a number like "1600"
     bool setRec(bool start);                  // idempotent: presses REC only if needed
@@ -79,6 +81,7 @@ public:
     bool setShutter(const std::string& enc);
     bool setWb(const std::string& enc);
     bool setWbKelvin(const std::string& value); // switch WB to Color Temp + set Kelvin
+    bool setMicGain(const std::string& value);  // уровень записи микрофона, 0..31
 
     // Live view (on-demand). jpegOut = latest JPEG; framesJson = focus/face/tracking
     // frame rectangles (normalized). Returns false if a frame isn't ready yet.
