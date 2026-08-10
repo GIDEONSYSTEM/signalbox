@@ -488,7 +488,7 @@ static void maybeOfferFirewallRules() {
 static bool        jsonGet(const std::string&, const std::string&, std::string&);   // определены ниже
 static std::string jsonEscape(const std::string&);
 
-static const char*    kAppVersion = "1.0.2";
+static const char*    kAppVersion = "1.0.3";
 // ЗАПОЛНИТЬ после создания репозитория, формат "владелец/репозиторий".
 // Пустая строка = проверка обновлений выключена.
 static const wchar_t* kUpdateRepo = L"GIDEONSYSTEM/signalbox";
@@ -2099,17 +2099,24 @@ int main() {
     if (!relaunched) maybeOfferFirewallRules();
 
     // Проверка обновлений — в фоне и без блокировки: нет интернета, нет репозитория —
-    // просто ничего не происходит.
+    // просто ничего не происходит. Первый раз сразу при запуске, дальше периодически:
+    // студия может держать программу включённой сутками, и о новой версии надо узнать
+    // не только в момент старта.
     std::thread([]{
-        checkUpdateOnce(true);
-        if (g_autoUpdate.load()) {
-            bool avail = false;
-            { std::lock_guard<std::mutex> lk(g_updMutex); avail = g_upd.available; }
-            if (avail) {
-                std::string err;
-                if (!startUpdateInstall(err))
-                    consolePrintf("[update] Автообновление не удалось: %s\n", err.c_str());
+        const int intervalSec = 4 * 60 * 60;          // раз в 4 часа
+        while (g_running.load()) {
+            checkUpdateOnce(true);
+            if (g_autoUpdate.load()) {
+                bool avail = false;
+                { std::lock_guard<std::mutex> lk(g_updMutex); avail = g_upd.available; }
+                if (avail) {
+                    std::string err;
+                    if (!startUpdateInstall(err))
+                        consolePrintf("[update] Автообновление не удалось: %s\n", err.c_str());
+                }
             }
+            for (int i = 0; i < intervalSec && g_running.load(); ++i)
+                std::this_thread::sleep_for(1s);
         }
     }).detach();
     const std::wstring wwwDir = dir + L"\\www";

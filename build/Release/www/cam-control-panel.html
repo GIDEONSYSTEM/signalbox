@@ -312,6 +312,19 @@
   .lv-toggles{display:flex; gap:16px; margin-top:8px;}
   .lv-toggles .lv-fr{margin-top:0;}
 
+  /* метка «есть новая версия» — в шапке, видна всегда */
+  .upd-flag{display:none; align-items:center; justify-content:center; gap:3px;
+            height:26px; padding:0 8px; border-radius:7px; cursor:pointer;
+            background:rgba(65,214,126,.12); border:1px solid rgba(65,214,126,.45);
+            color:var(--ok); font-family:var(--cond); font-weight:700;
+            letter-spacing:.06em; font-size:10px; text-transform:uppercase;
+            animation:pulse 1.8s infinite;}
+  .upd-flag.show{display:inline-flex;}
+  .upd-flag:hover{background:rgba(65,214,126,.2);}
+  .upd-flag .a{font-size:13px; line-height:1;}
+  /* подсветка блока обновления, когда на него перешли по метке */
+  .upd.flash{outline:1px solid var(--ok); outline-offset:4px; border-radius:9px;}
+
   /* обновление программы */
   .upd{max-width:392px; width:100%; margin-left:auto; margin-right:auto;
        display:flex; flex-direction:column; gap:6px; padding:2px;}
@@ -367,6 +380,9 @@
   <div class="head">
     <div class="title">SignalBox</div>
     <div class="head-r">
+      <button class="upd-flag" id="updFlag" title="Доступна новая версия — нажми, чтобы перейти к обновлению">
+        <span class="a">↑</span><span id="updFlagVer"></span>
+      </button>
       <button class="icobtn" id="rstBtn" title="Перезагрузка" aria-label="Перезагрузка">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -1192,7 +1208,18 @@ document.getElementById('shareUrl').onclick=copyShare;
   const ver   = document.getElementById('updVer');
   const auto  = document.getElementById('updAuto');
   const check = document.getElementById('updCheck');
+  const flag  = document.getElementById('updFlag');
+  const flagV = document.getElementById('updFlagVer');
+  const box   = document.getElementById('updBox');
   let installing = false;
+  let wasAvailable = null;      // чтобы сказать о новой версии один раз, а не каждые 20 с
+
+  // метка в шапке ведёт к блоку обновления и подсвечивает его
+  flag.onclick = ()=>{
+    box.scrollIntoView({behavior:'smooth', block:'center'});
+    box.classList.add('flash');
+    setTimeout(()=>box.classList.remove('flash'), 2000);
+  };
 
   async function refresh(){
     try{
@@ -1203,12 +1230,20 @@ document.getElementById('shareUrl').onclick=copyShare;
       auto.disabled  = !d.configured;
       if(!d.configured){
         nw.classList.remove('show');
+        flag.classList.remove('show');
         ver.textContent = line + ' · обновления не настроены';
         return;
       }
       if(d.error) line += ' · ' + d.error;
       ver.textContent = line;
       if(installing) return;                      // идёт установка — плашку не трогаем
+
+      // Метка в шапке висит с запуска и до тех пор, пока не поставят свежую версию.
+      flag.classList.toggle('show', !!d.available);
+      flagV.textContent = d.available ? d.latest : '';
+      if(d.available && wasAvailable === false) showToast('Доступна версия ' + d.latest);
+      wasAvailable = !!d.available;
+
       if(d.available){
         msg.textContent = 'Доступна версия ' + d.latest;
         nw.classList.add('show');
@@ -1227,6 +1262,7 @@ document.getElementById('shareUrl').onclick=copyShare;
   go.onclick = async ()=>{
     installing = true;
     go.disabled = true;
+    flag.classList.remove('show');
     msg.textContent = 'Качаю и ставлю обновление…';
     showToast('Программа перезапустится сама');
     try{ await fetch(`${LV_BASE}/update/install`,{method:'POST'}); }catch(_){}
