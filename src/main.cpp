@@ -13,16 +13,9 @@
 //
 // Built with the same toolchain as RemoteCli (VS2022, v143, UNICODE).
 
-#include "HttpServer.h"        // pulls in winsock2 before windows.h
+#include "HttpServer.h"
 #include "CameraSession.h"
-
-#include <windows.h>
-#include <mmsystem.h>        // MIDI input (winmm)
-#include <shellapi.h>        // ShellExecuteW: open the panel in the browser
-#include <share.h>           // _SH_DENYWR: keep the log readable while running
-#include <iphlpapi.h>        // GetAdaptersAddresses: pick the real LAN interface
-#include <netfw.h>           // Windows Firewall COM API: check/add our inbound rules
-#include <winhttp.h>         // HTTPS-клиент для обновлений (встроен в Windows)
+#include "platform/Platform.h" // всё, что зависит от ОС, — только через этот слой
 
 #include <atomic>
 #include <cctype>
@@ -57,11 +50,10 @@ static std::mutex                                  g_camsMutex;    // guards g_c
 static std::mutex                                  g_statusMutex;  // guards g_statusJson
 static std::string                                 g_statusJson = "{\"cameras\":[]}";
 
-// ---- MIDI input (winmm): a control-surface key toggles recording on all cameras ----
-static std::vector<HMIDIIN>    g_midiIn;                 // open MIDI input handles
+// ---- MIDI input: a control-surface key toggles recording on all cameras ----
 static std::mutex              g_midiMx;                 // guards g_midiQ
 static std::condition_variable g_midiCv;
-static std::deque<DWORD>       g_midiQ;                  // packed short messages (dwParam1)
+static std::deque<unsigned>    g_midiQ;                  // упакованное короткое сообщение
 
 // ---- live view on-demand cache ----
 // seq растёт только когда кадр РЕАЛЬНО изменился. Клиент присылает свой seq и
@@ -87,27 +79,11 @@ static const unsigned short kPort = 8787;
 static std::mutex g_logMutex;
 static FILE*      g_logFile = nullptr;
 
-// Print to the console as real Unicode (UTF-16). This does NOT depend on the
-// console output code page, which the Sony SDK resets on Connect — so it stays
-// readable for the whole run. Falls back to raw UTF-8 bytes when redirected.
-// Always mirrored into the log file.
+// Consoleful runs print to the console (plat::writeConsole does it as real
+// Unicode, независимо от кодовой страницы), а в GUI-подсистеме консоли нет
+// вовсе — там всё видно только в логе, поэтому пишем туда всегда.
 static void writeConsoleUtf8(const std::string& s) {
-    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD mode;
-    if (h && h != INVALID_HANDLE_VALUE) {          // no console at all in GUI subsystem
-        if (GetConsoleMode(h, &mode)) {
-            int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-            if (wlen > 0) {
-                std::wstring w(static_cast<size_t>(wlen), L'\0');
-                MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), &w[0], wlen);
-                DWORD written = 0;
-                WriteConsoleW(h, w.c_str(), static_cast<DWORD>(w.size()), &written, nullptr);
-            }
-        } else {
-            DWORD wr = 0;
-            WriteFile(h, s.c_str(), static_cast<DWORD>(s.size()), &wr, nullptr);
-        }
-    }
+    plat::writeConsole(s);
     std::lock_guard<std::mutex> lk(g_logMutex);
     if (g_logFile) { std::fwrite(s.data(), 1, s.size(), g_logFile); std::fflush(g_logFile); }
 }
@@ -123,11 +99,6 @@ static void consolePrintf(const char* fmt, ...) {
     writeConsoleUtf8(std::string(buf, len));
 }
 
-static BOOL WINAPI ctrlHandler(DWORD) {
-    g_running.store(false);   // Ctrl+C / window close: plain quit (no restart marker)
-    return TRUE;
-}
-
 // Request a full restart. The app relaunches ITSELF on exit (see shutdown),
 // so this works no matter how it was started (bat, shortcut to bat, shortcut
 // to exe, ...). Ctrl+C / 'q' don't set this, so they just quit.
@@ -136,25 +107,14 @@ static void requestRestart() {
     g_running.store(false);
 }
 
-static std::wstring exeDir() {
-    wchar_t path[MAX_PATH] = {0};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    std::wstring p(path);
-    size_t slash = p.find_last_of(L"\\/");
-    return (slash == std::wstring::npos) ? L"." : p.substr(0, slash);
-}
-
 // Fresh log next to the exe on every start (previous run kept as .log.prev).
 static void openLogFile() {
-    const std::wstring cur  = exeDir() + L"\\SignalBox.log";
-    const std::wstring prev = exeDir() + L"\\SignalBox.log.prev";
-    MoveFileExW(cur.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
-    // _wfsopen + _SH_DENYNO (not _wfopen_s, which locks the file exclusively):
-    // the log must stay open to readers while SignalBox is running — that is the
-    // whole point of it now that there is no console to watch. DENYNO (and not
-    // DENYWR) so that even readers asking for FileShare.Read — Notepad, PowerShell
-    // ReadAllText — can open it while we keep writing.
-    FILE* f = _wfsopen(cur.c_str(), L"wb", _SH_DENYNO);
+    const std::string cur  = plat::joinPath(plat::exeDir(), "SignalBox.log");
+    const std::string prev = plat::joinPath(plat::exeDir(), "SignalBox.log.prev");
+    plat::replaceFile(cur, prev);
+    // Файл должен остаться читаемым, пока мы в него пишем — без консоли это
+    // единственный способ увидеть, что происходит (см. openForSharedWrite).
+    FILE* f = plat::openForSharedWrite(cur);
     if (f) {
         // UTF-8 BOM so Notepad shows the Russian messages instead of mojibake.
         static const unsigned char kBom[3] = {0xEF, 0xBB, 0xBF};
@@ -168,136 +128,26 @@ static void openLogFile() {
 // Open the control panel in the default browser. This is the app's only UI:
 // there is no console window, so the panel is how the user sees and stops it.
 static void openPanelInBrowser() {
-    wchar_t url[64];
-    swprintf_s(url, L"http://127.0.0.1:%u/", static_cast<unsigned>(kPort));
-    // ShellExecute returns >32 on success; anything else means no browser was
-    // launched, and with no console the log is the only place to say so.
-    HINSTANCE rc = ShellExecuteW(nullptr, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
-    if (reinterpret_cast<INT_PTR>(rc) > 32) {
+    const std::string url = "http://127.0.0.1:" + std::to_string(kPort) + "/";
+    // Не открылось — с этим ничего не сделать автоматически, но без консоли
+    // сказать об этом можно только в лог.
+    if (plat::openUrl(url))
         consolePrintf("Панель открыта в браузере по умолчанию.\n");
-    } else {
-        consolePrintf("Не удалось открыть браузер (код %lld). Открой вручную: http://127.0.0.1:%u/\n",
-                      static_cast<long long>(reinterpret_cast<INT_PTR>(rc)), static_cast<unsigned>(kPort));
-    }
-}
-
-// ---------------- tray icon ----------------
-// The panel is served to a browser, so without this the app would have no
-// presence on the desktop at all: closing the tab would leave it running with
-// no obvious way to stop it (and killing it from Task Manager is exactly what
-// strands a camera session -> 0x820A).
-static const UINT WM_TRAYICON      = WM_APP + 1;
-static const UINT IDM_TRAY_OPEN    = 1001;
-static const UINT IDM_TRAY_RESTART = 1002;
-static const UINT IDM_TRAY_QUIT    = 1003;
-
-static HWND              g_trayWnd = nullptr;
-static NOTIFYICONDATAW   g_nid{};
-static std::atomic<bool> g_trayAdded{false};
-
-static void trayRemove() {
-    if (g_trayAdded.exchange(false)) Shell_NotifyIconW(NIM_DELETE, &g_nid);
-}
-
-static void showTrayMenu(HWND hwnd) {
-    POINT pt; GetCursorPos(&pt);
-    HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING,    IDM_TRAY_OPEN,    L"Открыть панель");
-    AppendMenuW(m, MF_STRING,    IDM_TRAY_RESTART, L"Перезапустить");
-    AppendMenuW(m, MF_SEPARATOR, 0,                nullptr);
-    AppendMenuW(m, MF_STRING,    IDM_TRAY_QUIT,    L"Выключить SignalBox");
-    SetForegroundWindow(hwnd);                 // else the menu won't close on click-away
-    TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
-    PostMessageW(hwnd, WM_NULL, 0, 0);         // documented TrackPopupMenu workaround
-    DestroyMenu(m);
-}
-
-static LRESULT CALLBACK trayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-    case WM_TRAYICON:
-        if (LOWORD(lp) == WM_RBUTTONUP)        showTrayMenu(hwnd);
-        else if (LOWORD(lp) == WM_LBUTTONDBLCLK) openPanelInBrowser();
-        return 0;
-    case WM_COMMAND:
-        switch (LOWORD(wp)) {
-        case IDM_TRAY_OPEN:    openPanelInBrowser(); break;
-        case IDM_TRAY_RESTART: requestRestart();     break;   // same as the panel button
-        case IDM_TRAY_QUIT:    g_running.store(false); break; // same clean path as 'q'
-        }
-        return 0;
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-// Owns the icon and its message pump; the rest of the app never blocks on it.
-static void trayWorker() {
-    const wchar_t* kCls = L"SignalBoxTrayWnd";
-    WNDCLASSEXW wc{};
-    wc.cbSize        = sizeof(wc);
-    wc.lpfnWndProc   = trayWndProc;
-    wc.hInstance     = GetModuleHandleW(nullptr);
-    wc.lpszClassName = kCls;
-    RegisterClassExW(&wc);
-
-    g_trayWnd = CreateWindowExW(0, kCls, L"SignalBox", 0, 0, 0, 0, 0,
-                                HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
-    if (!g_trayWnd) {
-        consolePrintf("[tray] Не удалось создать окно значка (код %lu).\n", GetLastError());
-        return;
-    }
-    consolePrintf("[tray] Окно значка создано (hwnd=%p).\n", static_cast<void*>(g_trayWnd));
-
-    g_nid.cbSize           = sizeof(g_nid);
-    g_nid.hWnd             = g_trayWnd;
-    g_nid.uID              = 1;
-    g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon            = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));   // res/app.rc
-    if (!g_nid.hIcon) g_nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wcscpy_s(g_nid.szTip, L"SignalBox");
-    if (Shell_NotifyIconW(NIM_ADD, &g_nid)) {
-        g_trayAdded.store(true);
-        consolePrintf("[tray] Значок добавлен в область уведомлений.\n");
-    } else {
-        consolePrintf("[tray] Не удалось добавить значок (код %lu).\n", GetLastError());
-    }
-
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-    trayRemove();
+    else
+        consolePrintf("Не удалось открыть браузер. Открой вручную: %s\n", url.c_str());
 }
 
 // ---------------- restart / shutdown safety ----------------
-static void releaseSingleInstance();          // defined with the single-instance guard below
 static std::atomic<bool> g_relaunchDone{false};
 
 static void relaunchSelf() {
     if (g_relaunchDone.exchange(true)) return;      // never spawn twice
     consolePrintf("Перезапуск...\n");
-    releaseSingleInstance();   // hand the slot over so the fresh copy starts at once
-    wchar_t exePath[MAX_PATH] = {0};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    const std::wstring wd = exeDir();
+    plat::releaseSingleInstance();   // hand the slot over so the fresh copy starts at once
     // --restarted: the panel is already open in the browser, so the fresh
     // instance must not pop up a second tab.
-    std::wstring cmdLine = L"\"" + std::wstring(exePath) + L"\" --restarted";
-    std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
-    cmdBuf.push_back(L'\0');
-    STARTUPINFOW si{}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    if (CreateProcessW(exePath, cmdBuf.data(), nullptr, nullptr, FALSE, 0,
-                       nullptr, wd.c_str(), &si, &pi)) {
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    } else {
-        consolePrintf("Не удалось перезапуститься (код %lu).\n", GetLastError());
-    }
+    if (!plat::launch(plat::exePath(), "--restarted", plat::exeDir()))
+        consolePrintf("Не удалось перезапуститься.\n");
 }
 
 // The worker threads can sit inside blocking SDK calls — Connect() to a camera
@@ -310,174 +160,53 @@ static void startShutdownWatchdog(int seconds) {
         std::this_thread::sleep_for(std::chrono::seconds(seconds));
         consolePrintf("Штатное завершение затянулось (%d с) — принудительный выход.\n", seconds);
         if (g_restart.load()) relaunchSelf();
-        trayRemove();
-        TerminateProcess(GetCurrentProcess(), 0);
+        plat::removeTrayIcon();          // иначе в трее останется мёртвый значок
+        plat::terminateSelf(0);
     }).detach();
 }
 
-// ---------------- Windows Firewall ----------------
-// Cameras answer discovery with INBOUND UDP, and the panel is served over
-// inbound TCP. Windows creates its allow-rule only for the profile ticked in the
-// one-off popup, so a PC that works in one studio goes silent in another the
-// moment that network is classified differently (Private vs Public). We check
-// for our own rule and, with the user's consent, add one for ALL profiles.
-static const wchar_t* kFwRuleName = L"SignalBox";
-
-static std::wstring exeFullPath() {
-    wchar_t p[MAX_PATH] = {0};
-    GetModuleFileNameW(nullptr, p, MAX_PATH);
-    return std::wstring(p);
-}
+// ---------------- брандмауэр ----------------
+// Камеры отвечают на обнаружение ВХОДЯЩИМ UDP, а панель отдаётся по входящему
+// TCP — без разрешения ПК, работающий в одной студии, замолкает в другой.
+// Всё системное (COM-интерфейс правил и элевация) живёт в платформенном слое;
+// здесь остаётся политика: спросить один раз, запомнить отказ, написать в лог.
 
 // Marker next to the exe: the user said "no", don't nag on every start.
-static std::wstring fwSkipPath() { return exeDir() + L"\\firewall-skip.txt"; }
-
-// Reading the rule list needs no elevation.
-static bool firewallHasRuleFor(const std::wstring& exePath) {
-    bool found = false;
-    const HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    INetFwPolicy2* policy = nullptr;
-    if (SUCCEEDED(CoCreateInstance(__uuidof(NetFwPolicy2), nullptr, CLSCTX_INPROC_SERVER,
-                                   __uuidof(INetFwPolicy2), reinterpret_cast<void**>(&policy))) && policy) {
-        INetFwRules* rules = nullptr;
-        if (SUCCEEDED(policy->get_Rules(&rules)) && rules) {
-            IUnknown* unk = nullptr;
-            if (SUCCEEDED(rules->get__NewEnum(&unk)) && unk) {
-                IEnumVARIANT* en = nullptr;
-                if (SUCCEEDED(unk->QueryInterface(__uuidof(IEnumVARIANT), reinterpret_cast<void**>(&en))) && en) {
-                    VARIANT v; VariantInit(&v);
-                    ULONG got = 0;
-                    while (!found && en->Next(1, &v, &got) == S_OK && got) {
-                        INetFwRule* rule = nullptr;
-                        if (v.vt == VT_DISPATCH && v.pdispVal &&
-                            SUCCEEDED(v.pdispVal->QueryInterface(__uuidof(INetFwRule),
-                                      reinterpret_cast<void**>(&rule))) && rule) {
-                            BSTR app = nullptr;
-                            NET_FW_RULE_DIRECTION dir = NET_FW_RULE_DIR_IN;
-                            NET_FW_ACTION act = NET_FW_ACTION_BLOCK;
-                            VARIANT_BOOL enabled = VARIANT_FALSE;
-                            rule->get_ApplicationName(&app);
-                            rule->get_Direction(&dir);
-                            rule->get_Action(&act);
-                            rule->get_Enabled(&enabled);
-                            if (app && enabled && dir == NET_FW_RULE_DIR_IN && act == NET_FW_ACTION_ALLOW &&
-                                _wcsicmp(app, exePath.c_str()) == 0)
-                                found = true;
-                            if (app) SysFreeString(app);
-                            rule->Release();
-                        }
-                        VariantClear(&v);
-                    }
-                    en->Release();
-                }
-                unk->Release();
-            }
-            rules->Release();
-        }
-        policy->Release();
-    }
-    if (SUCCEEDED(hrInit)) CoUninitialize();
-    return found;
-}
-
-static bool addOneFwRule(INetFwRules* rules, const std::wstring& exePath, NET_FW_IP_PROTOCOL proto) {
-    INetFwRule* rule = nullptr;
-    if (FAILED(CoCreateInstance(__uuidof(NetFwRule), nullptr, CLSCTX_INPROC_SERVER,
-                                __uuidof(INetFwRule), reinterpret_cast<void**>(&rule))) || !rule)
-        return false;
-    BSTR name = SysAllocString(kFwRuleName);
-    BSTR desc = SysAllocString(L"Панель управления камерами и обнаружение камер в локальной сети");
-    BSTR app  = SysAllocString(exePath.c_str());
-    BSTR grp  = SysAllocString(kFwRuleName);
-    rule->put_Name(name);
-    rule->put_Description(desc);
-    rule->put_ApplicationName(app);
-    rule->put_Grouping(grp);
-    rule->put_Protocol(proto);
-    rule->put_Direction(NET_FW_RULE_DIR_IN);
-    rule->put_Action(NET_FW_ACTION_ALLOW);
-    rule->put_Profiles(NET_FW_PROFILE2_ALL);        // ключевое: любая сеть, не только текущая
-    rule->put_Enabled(VARIANT_TRUE);
-    const HRESULT hr = rules->Add(rule);
-    SysFreeString(name); SysFreeString(desc); SysFreeString(app); SysFreeString(grp);
-    rule->Release();
-    return SUCCEEDED(hr);
-}
-
-// Runs in the elevated one-shot instance (--firewall). Adds TCP + UDP inbound
-// allow rules for this exe, scoped to the program only — nothing else is touched.
-static bool addFirewallRules(const std::wstring& exePath) {
-    bool ok = false;
-    const HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    INetFwPolicy2* policy = nullptr;
-    if (SUCCEEDED(CoCreateInstance(__uuidof(NetFwPolicy2), nullptr, CLSCTX_INPROC_SERVER,
-                                   __uuidof(INetFwPolicy2), reinterpret_cast<void**>(&policy))) && policy) {
-        INetFwRules* rules = nullptr;
-        if (SUCCEEDED(policy->get_Rules(&rules)) && rules) {
-            const bool tcp = addOneFwRule(rules, exePath, NET_FW_IP_PROTOCOL_TCP);
-            const bool udp = addOneFwRule(rules, exePath, NET_FW_IP_PROTOCOL_UDP);
-            ok = tcp && udp;
-            rules->Release();
-        }
-        policy->Release();
-    }
-    if (SUCCEEDED(hrInit)) CoUninitialize();
-    return ok;
-}
+static std::string fwSkipPath() { return plat::joinPath(plat::exeDir(), "firewall-skip.txt"); }
 
 // Normal startup path: ask once, then hand the actual change to Windows' own
 // elevation prompt. Never changes anything without both confirmations.
 static void maybeOfferFirewallRules() {
-    const std::wstring exe = exeFullPath();
-    if (GetFileAttributesW(fwSkipPath().c_str()) != INVALID_FILE_ATTRIBUTES) return;
-    if (firewallHasRuleFor(exe)) {
+    if (!plat::firewallSupported()) return;
+    if (plat::fileExists(fwSkipPath())) return;
+    if (plat::firewallHasRuleForSelf()) {
         consolePrintf("[firewall] Разрешение уже выдано.\n");
         return;
     }
     consolePrintf("[firewall] Разрешения для SignalBox нет — спрашиваю пользователя.\n");
 
-    const int answer = MessageBoxW(nullptr,
-        L"Разрешить SignalBox приём подключений в локальной сети?\n\n"
-        L"Это нужно, чтобы находились камеры и чтобы панель открывалась "
-        L"с телефона и других компьютеров.\n\n"
-        L"Разрешение будет выдано для всех типов сетей — иначе в другой студии, "
-        L"где сеть определится иначе, камеры перестанут находиться.\n\n"
-        L"Потребуется подтверждение администратора Windows.",
-        L"SignalBox — доступ в сеть", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND);
+    const bool agreed = plat::askYesNo("SignalBox — доступ в сеть",
+        "Разрешить SignalBox приём подключений в локальной сети?\n\n"
+        "Это нужно, чтобы находились камеры и чтобы панель открывалась "
+        "с телефона и других компьютеров.\n\n"
+        "Разрешение будет выдано для всех типов сетей — иначе в другой студии, "
+        "где сеть определится иначе, камеры перестанут находиться.\n\n"
+        "Потребуется подтверждение администратора Windows.");
 
-    if (answer != IDYES) {
-        FILE* f = _wfsopen(fwSkipPath().c_str(), L"wb", _SH_DENYNO);
-        if (f) {
-            static const char kNote[] =
-                "\xEF\xBB\xBF"
-                "Пользователь отказался добавлять правило брандмауэра.\r\n"
-                "Удали этот файл, чтобы SignalBox спросил снова.\r\n";
-            std::fwrite(kNote, 1, sizeof(kNote) - 1, f);
-            std::fclose(f);
-        }
+    if (!agreed) {
+        static const char kNote[] =
+            "\xEF\xBB\xBF"
+            "Пользователь отказался добавлять правило брандмауэра.\r\n"
+            "Удали этот файл, чтобы SignalBox спросил снова.\r\n";
+        plat::writeFile(fwSkipPath(), kNote, sizeof(kNote) - 1);
         consolePrintf("[firewall] Пользователь отказался. Больше не спрашиваю (см. firewall-skip.txt).\n");
         return;
     }
 
-    // Elevate a one-shot copy of ourselves; Windows shows the UAC prompt.
-    SHELLEXECUTEINFOW si{};
-    si.cbSize       = sizeof(si);
-    si.fMask        = SEE_MASK_NOCLOSEPROCESS;
-    si.lpVerb       = L"runas";
-    si.lpFile       = exe.c_str();
-    si.lpParameters = L"--firewall";
-    si.lpDirectory  = exeDir().c_str();
-    si.nShow        = SW_HIDE;
-    if (!ShellExecuteExW(&si) || !si.hProcess) {
-        consolePrintf("[firewall] Не удалось запросить права администратора (код %lu).\n", GetLastError());
-        return;
-    }
-    WaitForSingleObject(si.hProcess, 30000);
-    DWORD code = 1;
-    GetExitCodeProcess(si.hProcess, &code);
-    CloseHandle(si.hProcess);
-    consolePrintf(code == 0 ? "[firewall] Правила добавлены (TCP+UDP, все сети).\n"
-                            : "[firewall] Добавить правила не удалось (код %lu).\n", code);
+    // Саму правку делает элевированная копия — ОС показывает свой запрос прав.
+    consolePrintf(plat::firewallRequestElevatedAdd()
+                      ? "[firewall] Правила добавлены (TCP+UDP, все сети).\n"
+                      : "[firewall] Добавить правила не удалось.\n");
 }
 
 // ---------------- обновление через GitHub Releases ----------------
@@ -491,7 +220,7 @@ static std::string jsonEscape(const std::string&);
 static const char*    kAppVersion = "1.0.5";
 // ЗАПОЛНИТЬ после создания репозитория, формат "владелец/репозиторий".
 // Пустая строка = проверка обновлений выключена.
-static const wchar_t* kUpdateRepo = L"GIDEONSYSTEM/signalbox";
+static const char*    kUpdateRepo = "GIDEONSYSTEM/signalbox";
 
 struct UpdateInfo {
     std::string current = kAppVersion;
@@ -506,78 +235,18 @@ static UpdateInfo        g_upd;
 static std::atomic<bool> g_updBusy{false};      // идёт проверка или установка
 static std::atomic<bool> g_autoUpdate{false};
 
-static std::wstring settingsPath() { return exeDir() + L"\\settings.json"; }
+static std::string settingsPath() { return plat::joinPath(plat::exeDir(), "settings.json"); }
 
 static void loadSettings() {
-    std::ifstream f(settingsPath(), std::ios::binary);
-    if (!f) return;
-    std::string s, line;
-    while (std::getline(f, line)) s += line;
+    std::string s;
+    if (!plat::readFile(settingsPath(), s)) return;
     std::string v;
     if (jsonGet(s, "autoUpdate", v)) g_autoUpdate.store(v == "true" || v == "1");
 }
 
 static void saveSettings() {
-    FILE* f = _wfsopen(settingsPath().c_str(), L"wb", _SH_DENYNO);
-    if (!f) return;
-    const std::string s = std::string("{\"autoUpdate\":") + (g_autoUpdate.load() ? "true" : "false") + "}\r\n";
-    std::fwrite(s.data(), 1, s.size(), f);
-    std::fclose(f);
-}
-
-// GET по HTTPS: тело в body и/или в файл. Редиректы WinHTTP отрабатывает сам —
-// ссылки GitHub на архивы как раз редиректят на CDN.
-static bool httpFetch(const std::wstring& url, std::string* body, const std::wstring& destFile,
-                      DWORD* statusOut = nullptr) {
-    URL_COMPONENTS uc{};
-    uc.dwStructSize = sizeof(uc);
-    wchar_t host[256] = {0}, path[4096] = {0};
-    uc.lpszHostName = host; uc.dwHostNameLength = 255;
-    uc.lpszUrlPath  = path; uc.dwUrlPathLength  = 4095;
-    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) return false;
-
-    HINTERNET hs = WinHttpOpen(L"SignalBox", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hs) return false;
-    DWORD timeout = 15000;
-    WinHttpSetTimeouts(hs, timeout, timeout, timeout, timeout);
-
-    bool ok = false;
-    if (HINTERNET hc = WinHttpConnect(hs, host, uc.nPort, 0)) {
-        const DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
-        if (HINTERNET hr = WinHttpOpenRequest(hc, L"GET", path, nullptr, WINHTTP_NO_REFERER,
-                                              WINHTTP_DEFAULT_ACCEPT_TYPES, flags)) {
-            const wchar_t* hdr = L"Accept: application/vnd.github+json\r\n";
-            if (WinHttpSendRequest(hr, hdr, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-                WinHttpReceiveResponse(hr, nullptr)) {
-                DWORD code = 0, len = sizeof(code);
-                WinHttpQueryHeaders(hr, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                    WINHTTP_HEADER_NAME_BY_INDEX, &code, &len, WINHTTP_NO_HEADER_INDEX);
-                if (statusOut) *statusOut = code;
-                if (code == 200) {
-                    FILE* f = destFile.empty() ? nullptr : _wfsopen(destFile.c_str(), L"wb", _SH_DENYNO);
-                    if (destFile.empty() || f) {
-                        ok = true;
-                        for (;;) {
-                            DWORD avail = 0;
-                            if (!WinHttpQueryDataAvailable(hr, &avail)) { ok = false; break; }
-                            if (!avail) break;
-                            std::vector<char> buf(avail);
-                            DWORD got = 0;
-                            if (!WinHttpReadData(hr, buf.data(), avail, &got)) { ok = false; break; }
-                            if (body) body->append(buf.data(), got);
-                            if (f)    std::fwrite(buf.data(), 1, got, f);
-                        }
-                    }
-                    if (f) std::fclose(f);
-                }
-            }
-            WinHttpCloseHandle(hr);
-        }
-        WinHttpCloseHandle(hc);
-    }
-    WinHttpCloseHandle(hs);
-    return ok;
+    plat::writeFile(settingsPath(),
+                    std::string("{\"autoUpdate\":") + (g_autoUpdate.load() ? "true" : "false") + "}\r\n");
 }
 
 // "v1.2.10" vs "1.3" -> -1 / 0 / 1. Сравниваем числами по частям, а не строками:
@@ -607,14 +276,14 @@ static void checkUpdateOnce(bool announce) {
     if (!kUpdateRepo || !*kUpdateRepo) return;          // репозиторий не настроен
     if (g_updBusy.exchange(true)) return;
 
-    const std::wstring api = L"https://api.github.com/repos/" + std::wstring(kUpdateRepo) +
-                             L"/releases/latest";
+    const std::string api = std::string("https://api.github.com/repos/") + kUpdateRepo +
+                            "/releases/latest";
     std::string json;
     UpdateInfo info;
     info.current = kAppVersion;
 
-    DWORD status = 0;
-    if (!httpFetch(api, &json, L"", &status)) {
+    int status = 0;
+    if (!plat::httpGet(api, &json, "", &status)) {
         // 404 у GitHub значит «релизов ещё нет» (или репозитория) — это не сетевая ошибка,
         // и на старте проекта пользователь увидит именно её.
         if (status == 404)      info.error = "релизов пока нет";
@@ -662,24 +331,8 @@ static void checkUpdateOnce(bool announce) {
     }
 }
 
-static bool runAndWait(const std::wstring& cmd, DWORD timeoutMs, DWORD* exitCode) {
-    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
-    buf.push_back(L'\0');
-    STARTUPINFOW si{}; si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                        nullptr, nullptr, &si, &pi)) return false;
-    const DWORD w = WaitForSingleObject(pi.hProcess, timeoutMs);
-    if (exitCode) GetExitCodeProcess(pi.hProcess, exitCode);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-    return w == WAIT_OBJECT_0;
-}
-
-static std::wstring updateStagingDir() {
-    wchar_t tmp[MAX_PATH] = {0};
-    GetTempPathW(MAX_PATH, tmp);
-    return std::wstring(tmp) + L"SignalBox-update";
+static std::string updateStagingDir() {
+    return plat::joinPath(plat::tempDir(), "SignalBox-update");
 }
 
 // Скачать архив, распаковать и запустить распакованную копию в режиме --apply-update:
@@ -691,39 +344,30 @@ static bool startUpdateInstall(std::string& err) {
     if (!info.available || info.url.empty()) { err = "обновление недоступно"; return false; }
     if (g_updBusy.exchange(true))            { err = "обновление уже идёт";  return false; }
 
-    const std::wstring stage = updateStagingDir();
-    const std::wstring zip   = stage + L"\\update.zip";
-    const std::wstring src   = stage + L"\\SignalBox";      // внутри архива папка SignalBox\
+    const std::string stage = updateStagingDir();
+    const std::string zip   = plat::joinPath(stage, "update.zip");
+    const std::string src   = plat::joinPath(stage, "SignalBox");   // внутри архива папка SignalBox\
 
     bool ok = false;
     do {
         // чистая площадка
-        runAndWait(L"cmd.exe /c rd /s /q \"" + stage + L"\"", 20000, nullptr);
-        if (!CreateDirectoryW(stage.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
-            err = "не удалось создать временную папку"; break;
-        }
-        const std::wstring wurl(info.url.begin(), info.url.end());
-        consolePrintf("[update] Качаю %s\n", info.url.c_str());
-        if (!httpFetch(wurl, nullptr, zip)) { err = "не удалось скачать архив"; break; }
+        plat::removeTree(stage);
+        if (!plat::makeDir(stage)) { err = "не удалось создать временную папку"; break; }
 
-        DWORD rc = 1;
-        // tar.exe входит в состав Windows 10/11 и умеет zip
-        runAndWait(L"tar.exe -xf \"" + zip + L"\" -C \"" + stage + L"\"", 120000, &rc);
-        if (rc != 0 || GetFileAttributesW((src + L"\\SignalBox.exe").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        consolePrintf("[update] Качаю %s\n", info.url.c_str());
+        if (!plat::httpGet(info.url, nullptr, zip, nullptr)) {
+            err = "не удалось скачать архив"; break;
+        }
+
+        if (!plat::extractArchive(zip, stage) || !plat::fileExists(plat::joinPath(src, "SignalBox.exe"))) {
             err = "архив распаковался неправильно"; break;
         }
 
-        wchar_t pid[32]; swprintf_s(pid, L"%lu", GetCurrentProcessId());
-        const std::wstring cmd = L"\"" + src + L"\\SignalBox.exe\" --apply-update \"" +
-                                 exeDir() + L"\" " + pid;
-        std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(L'\0');
-        STARTUPINFOW si{}; si.cb = sizeof(si);
-        PROCESS_INFORMATION pi{};
-        if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, 0,
-                            nullptr, src.c_str(), &si, &pi)) {
+        const std::string args = "--apply-update \"" + plat::exeDir() + "\" " +
+                                 std::to_string(plat::currentPid());
+        if (!plat::launch(plat::joinPath(src, "SignalBox.exe"), args, src)) {
             err = "не удалось запустить установщик"; break;
         }
-        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
         consolePrintf("[update] Ставлю версию %s, выключаюсь...\n", info.latest.c_str());
         ok = true;
     } while (false);
@@ -734,37 +378,24 @@ static bool startUpdateInstall(std::string& err) {
 }
 
 // Режим установщика: ждём выхода старого процесса, копируем файлы, запускаем обновлённую копию.
-static int applyUpdate(const std::wstring& cmdLine) {
+static int applyUpdate(const std::string& cmdLine) {
     // ... --apply-update "<target>" <pid>
-    const size_t k = cmdLine.find(L"--apply-update");
-    if (k == std::wstring::npos) return 1;
-    size_t q1 = cmdLine.find(L'"', k);
-    size_t q2 = (q1 == std::wstring::npos) ? q1 : cmdLine.find(L'"', q1 + 1);
-    if (q2 == std::wstring::npos) return 1;
-    const std::wstring target = cmdLine.substr(q1 + 1, q2 - q1 - 1);
-    const DWORD pid = static_cast<DWORD>(_wtoi(cmdLine.c_str() + q2 + 1));
+    const size_t k = cmdLine.find("--apply-update");
+    if (k == std::string::npos) return 1;
+    size_t q1 = cmdLine.find('"', k);
+    size_t q2 = (q1 == std::string::npos) ? q1 : cmdLine.find('"', q1 + 1);
+    if (q2 == std::string::npos) return 1;
+    const std::string target = cmdLine.substr(q1 + 1, q2 - q1 - 1);
+    const unsigned long pid = std::strtoul(cmdLine.c_str() + q2 + 1, nullptr, 10);
 
-    if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
-        WaitForSingleObject(h, 30000);
-        CloseHandle(h);
-    }
+    plat::waitForProcess(pid, 30000);
     std::this_thread::sleep_for(700ms);           // дать ОС отпустить DLL
 
-    const std::wstring src = updateStagingDir() + L"\\SignalBox";
-    DWORD rc = 16;
-    runAndWait(L"robocopy \"" + src + L"\" \"" + target +
-               L"\" /E /NFL /NDL /NJH /NJS /NP /R:3 /W:1", 180000, &rc);
-    if (rc >= 8) return 1;                        // у robocopy успех — это код < 8
+    // Копируем поверх, не удаляя лишнее в приёмнике: данные установки
+    // (cameras.txt, groups.json, settings.json) в архив не входят и должны пережить обновление.
+    if (!plat::copyTree(plat::joinPath(updateStagingDir(), "SignalBox"), target)) return 1;
 
-    STARTUPINFOW si{}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    const std::wstring exe = target + L"\\SignalBox.exe";
-    std::wstring cmd = L"\"" + exe + L"\"";
-    std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(L'\0');
-    if (CreateProcessW(exe.c_str(), buf.data(), nullptr, nullptr, FALSE, 0,
-                       nullptr, target.c_str(), &si, &pi)) {
-        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-    }
+    plat::launch(plat::joinPath(target, "SignalBox.exe"), "", target);
     return 0;
 }
 
@@ -786,46 +417,13 @@ static std::string updateJson() {
 // Several copies (dev build, an unpacked portable folder, a stale launch) all
 // fight for port 8787: whichever binds first serves ITS OWN www/, so the panel
 // can silently come from an outdated folder. One instance only.
-static HANDLE g_singleInstance = nullptr;
+static const char* kInstanceName = "SignalBox_SingleInstance";
 
-// waitForPrevious: on a self-restart the outgoing process still holds the slot
-// for a moment, so wait it out instead of refusing to start.
-static bool acquireSingleInstance(bool waitForPrevious) {
-    const int tries = waitForPrevious ? 75 : 1;          // ~15s
-    for (int i = 0; i < tries; ++i) {
-        HANDLE h = CreateMutexW(nullptr, TRUE, L"Local\\SignalBox_SingleInstance");
-        if (!h) return true;                             // can't tell — never block startup
-        if (GetLastError() != ERROR_ALREADY_EXISTS) { g_singleInstance = h; return true; }
-        CloseHandle(h);
-        if (i + 1 < tries) std::this_thread::sleep_for(200ms);
-    }
-    return false;
-}
-
-static void releaseSingleInstance() {
-    if (!g_singleInstance) return;
-    ReleaseMutex(g_singleInstance);
-    CloseHandle(g_singleInstance);
-    g_singleInstance = nullptr;
-}
-
+// Имя этого ПК показывается в подсказке про связывание: на камере в списке
+// устройств пользователь ищет именно его.
 static std::string pcName() {
-    wchar_t buf[256]; DWORD n = 256;
-    if (GetComputerNameW(buf, &n)) {
-        int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0, nullptr, nullptr);
-        if (len > 1) { std::string s(len - 1, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, buf, -1, &s[0], len, nullptr, nullptr); return s; }
-    }
-    return "(этот ПК)";
-}
-
-static std::string w2u(const wchar_t* w) {
-    if (!w) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 1) return {};
-    std::string s(static_cast<size_t>(len - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, &s[0], len, nullptr, nullptr);
-    return s;
+    const std::string n = plat::computerName();
+    return n.empty() ? std::string("(этот ПК)") : n;
 }
 
 // Rank an IPv4 so we pick the real home/LAN address (what a phone uses), not a
@@ -844,26 +442,13 @@ static int ipScore(const std::string& ip) {
 // Fallback when the adapter table is unavailable: every IPv4 this host answers
 // with, ranked by address range only.
 static std::string localIPv4ByHostname() {
-    char host[256] = {0};
-    if (gethostname(host, sizeof(host)) != 0) return {};
-    addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_DGRAM;
-    addrinfo* res = nullptr;
-    if (getaddrinfo(host, nullptr, &hints, &res) != 0) return {};
     std::string best; int bestScore = -1;
-    for (addrinfo* p = res; p; p = p->ai_next) {
-        auto* sa = reinterpret_cast<sockaddr_in*>(p->ai_addr);
-        char buf[64] = {0};
-        if (::inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf))) {
-            int sc = ipScore(buf);
-            if (sc > bestScore) { bestScore = sc; best = buf; }
-        }
+    for (const std::string& ip : plat::hostIPv4Addresses()) {
+        const int sc = ipScore(ip);
+        if (sc > bestScore) { bestScore = sc; best = ip; }
     }
-    freeaddrinfo(res);
     return best;
 }
-
-// ipifcons.h values — iphlpapi.h does not always pull that header in.
-static const IFTYPE kIfPPP = 23, kIfLoopback = 24, kIfPropVirtual = 53, kIfTunnel = 131;
 
 // The LAN address other devices use to reach this panel: it fills status.json's
 // "server", which drives both the address line and the QR code.
@@ -877,52 +462,22 @@ static const IFTYPE kIfPPP = 23, kIfLoopback = 24, kIfPropVirtual = 53, kIfTunne
 // Every candidate and its weight is logged, so a bad pick elsewhere is diagnosable.
 static std::string localIPv4() {
     static const std::string cached = []() -> std::string {
-        const ULONG flags = GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST |
-                            GAA_FLAG_SKIP_MULTICAST  | GAA_FLAG_SKIP_DNS_SERVER;
-        ULONG size = 15000;
-        std::vector<char> buf(size);
-        ULONG rc = GetAdaptersAddresses(AF_INET, flags, nullptr,
-                       reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()), &size);
-        if (rc == ERROR_BUFFER_OVERFLOW) {
-            buf.resize(size);
-            rc = GetAdaptersAddresses(AF_INET, flags, nullptr,
-                       reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()), &size);
-        }
+        const std::vector<plat::NetInterface> ifaces = plat::listIPv4Interfaces();
 
         std::string best;
         int bestScore = -1000000;
-        if (rc == NO_ERROR) {
-            for (auto* a = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()); a; a = a->Next) {
-                if (a->OperStatus != IfOperStatusUp) continue;      // e.g. unplugged Bluetooth
-                if (a->IfType == kIfLoopback) continue;
-
-                bool gw = false;                                    // a REAL gateway, not 0.0.0.0
-                for (auto* g = a->FirstGatewayAddress; g; g = g->Next) {
-                    if (g->Address.lpSockaddr && g->Address.lpSockaddr->sa_family == AF_INET &&
-                        reinterpret_cast<sockaddr_in*>(g->Address.lpSockaddr)->sin_addr.s_addr != 0) {
-                        gw = true; break;
-                    }
-                }
-                const bool virt = (a->IfType == kIfTunnel || a->IfType == kIfPPP ||
-                                   a->IfType == kIfPropVirtual);
-
-                for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
-                    if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
-                    auto* s = reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr);
-                    char ip[64] = {0};
-                    if (!::inet_ntop(AF_INET, &s->sin_addr, ip, sizeof(ip))) continue;
-                    int sc = ipScore(ip);
-                    if (virt) sc -= 60;      // VPN / Hyper-V / Docker style adapter
-                    if (gw)   sc += 25;      // has a way off its own subnet -> a real LAN
-                    consolePrintf("[net]   %s — %s (тип %lu%s%s) -> вес %d\n",
-                                  w2u(a->FriendlyName).c_str(), ip, a->IfType,
-                                  virt ? ", виртуальный" : "",
-                                  gw ? ", шлюз есть" : ", без шлюза", sc);
-                    if (sc > bestScore) { bestScore = sc; best = ip; }
-                }
-            }
-        } else {
-            consolePrintf("[net] Не удалось прочитать список адаптеров (код %lu).\n", rc);
+        if (ifaces.empty()) {
+            consolePrintf("[net] Список сетевых интерфейсов пуст или недоступен.\n");
+        }
+        for (const plat::NetInterface& n : ifaces) {
+            int sc = ipScore(n.ip);
+            if (n.virtualIf)  sc -= 60;      // VPN / Hyper-V / Docker style adapter
+            if (n.hasGateway) sc += 25;      // has a way off its own subnet -> a real LAN
+            consolePrintf("[net]   %s — %s (тип %u%s%s) -> вес %d\n",
+                          n.name.c_str(), n.ip.c_str(), n.type,
+                          n.virtualIf ? ", виртуальный" : "",
+                          n.hasGateway ? ", шлюз есть" : ", без шлюза", sc);
+            if (sc > bestScore) { bestScore = sc; best = n.ip; }
         }
 
         if (best.empty()) {
@@ -994,12 +549,8 @@ static std::string contentTypeFor(const std::string& path) {
     return "application/octet-stream";
 }
 
-static bool readFileBinary(const std::wstring& full, std::string& out) {
-    std::ifstream f(full, std::ios::binary);
-    if (!f) return false;
-    std::ostringstream ss; ss << f.rdbuf();
-    out = ss.str();
-    return true;
+static bool readFileBinary(const std::string& full, std::string& out) {
+    return plat::readFile(full, out);
 }
 
 // Map raw SDK model names to friendly display names.
@@ -1142,23 +693,16 @@ static bool modelTokenFor(const std::string& raw, std::string& token) {
 // IP. Per the SDK docs the MAC is only an identifier for the camera object and
 // need not match the body — it just has to be unique per object.
 static void macForIp(CrInt32u ipLe, CrInt8u out[6]) {
-    ULONG mac[2] = {0, 0};
-    ULONG len = 6;
-    if (::SendARP(static_cast<IPAddr>(ipLe), 0, mac, &len) == NO_ERROR && len == 6) {
-        std::memcpy(out, mac, 6);
-        return;
-    }
+    if (plat::arpMac(static_cast<uint32_t>(ipLe), out)) return;
     out[0] = 0x02; out[1] = 0x00;                       // locally-administered
     std::memcpy(out + 2, &ipLe, 4);
 }
 
-static std::wstring manualCamsPath() { return exeDir() + L"\\cameras.txt"; }
+static std::string manualCamsPath() { return plat::joinPath(plat::exeDir(), "cameras.txt"); }
 
 static void ensureManualCamsFile() {
-    const std::wstring p = manualCamsPath();
-    if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return;
-    FILE* f = _wfsopen(p.c_str(), L"wb", _SH_DENYNO);
-    if (!f) return;
+    const std::string p = manualCamsPath();
+    if (plat::fileExists(p)) return;
     static const char kTemplate[] =
         "\xEF\xBB\xBF"
         "# Камеры, добавляемые вручную — по IP, без автопоиска.\r\n"
@@ -1182,16 +726,17 @@ static void ensureManualCamsFile() {
         "#\r\n"
         "# Файл перечитывается при каждом сканировании сети — правку\r\n"
         "# подхватит без перезапуска.\r\n";
-    std::fwrite(kTemplate, 1, sizeof(kTemplate) - 1, f);
-    std::fclose(f);
+    plat::writeFile(p, kTemplate, sizeof(kTemplate) - 1);
 }
 
 static std::vector<ManualCam> readManualCams() {
     std::vector<ManualCam> out;
-    std::ifstream f(manualCamsPath());
-    if (!f) return out;
+    std::string text;
+    if (!plat::readFile(manualCamsPath(), text)) return out;
+    std::istringstream f(text);
     std::string line;
     while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty() && static_cast<unsigned char>(line[0]) == 0xEF)
             line.erase(0, 3);                                   // UTF-8 BOM
         const size_t hash = line.find('#');
@@ -1222,8 +767,9 @@ static std::atomic<bool> g_rescanNow{false};
 
 static std::vector<std::string> manualFileLines() {
     std::vector<std::string> lines;
-    std::ifstream f(manualCamsPath(), std::ios::binary);
-    if (!f) return lines;
+    std::string text;
+    if (!plat::readFile(manualCamsPath(), text)) return lines;
+    std::istringstream f(text);
     std::string line;
     while (std::getline(f, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -1233,17 +779,14 @@ static std::vector<std::string> manualFileLines() {
 }
 
 static bool writeManualFile(const std::vector<std::string>& lines) {
-    FILE* f = _wfsopen(manualCamsPath().c_str(), L"wb", _SH_DENYNO);
-    if (!f) return false;
-    std::fwrite("\xEF\xBB\xBF", 1, 3, f);                       // keep it Notepad-friendly
+    std::string out = "\xEF\xBB\xBF";                           // keep it Notepad-friendly
     for (std::string s : lines) {
         if (!s.empty() && static_cast<unsigned char>(s[0]) == 0xEF && s.size() >= 3)
             s.erase(0, 3);                                       // strip an inherited BOM
-        s += "\r\n";
-        std::fwrite(s.data(), 1, s.size(), f);
+        out += s;
+        out += "\r\n";
     }
-    std::fclose(f);
-    return true;
+    return plat::writeFile(manualCamsPath(), out);
 }
 
 // First whitespace-separated token of a non-comment line, "" for comments/blanks.
@@ -1259,8 +802,8 @@ static std::string entryIpOf(const std::string& line) {
 
 // err is a ready-to-show Russian message.
 static bool manualAdd(const std::string& ip, const std::string& model, bool ssh, std::string& err) {
-    IN_ADDR probe{};
-    if (::inet_pton(AF_INET, ip.c_str(), &probe) != 1) { err = "Это не похоже на IP-адрес"; return false; }
+    uint32_t probe = 0;
+    if (!plat::ipv4ToNumber(ip, probe)) { err = "Это не похоже на IP-адрес"; return false; }
     std::string token;
     if (!modelTokenFor(model, token)) { err = "Неизвестная модель камеры"; return false; }
 
@@ -1324,16 +867,16 @@ static void addManualCamsOnce(bool announce) {
     { std::lock_guard<std::mutex> lk(g_manualFileMutex); entries = readManualCams(); }
 
     for (const ManualCam& mc : entries) {
-        IN_ADDR addr{};
-        if (::inet_pton(AF_INET, mc.ip.c_str(), &addr) != 1) {
+        uint32_t addr = 0;
+        if (!plat::ipv4ToNumber(mc.ip, addr)) {
             std::lock_guard<std::mutex> lk(s_warnMutex);
             if (s_warned[mc.ip]++ == 0)
                 consolePrintf("[cameras.txt] \"%s\" — это не IP-адрес.\n", mc.ip.c_str());
             continue;
         }
-        // Docs: 1st octet -> bits 7..0 ... 4th -> bits 31..24, i.e. exactly the
-        // little-endian in_addr that inet_pton produces (192.168.0.5 = 0x0500A8C0).
-        const CrInt32u ipLe = static_cast<CrInt32u>(addr.S_un.S_addr);
+        // Порядок байт для SDK: 1-й октет -> биты 7..0 ... 4-й -> 31..24
+        // (192.168.0.5 = 0x0500A8C0) — ровно это отдаёт plat::ipv4ToNumber.
+        const CrInt32u ipLe = static_cast<CrInt32u>(addr);
 
         {
             std::lock_guard<std::mutex> lk(g_camsMutex);
@@ -1381,7 +924,7 @@ static void addManualCamsOnce(bool announce) {
 struct KnownCam { std::string mac, ip, model; };
 
 static std::mutex g_knownMutex;
-static std::wstring knownCamsPath() { return exeDir() + L"\\cameras-known.txt"; }
+static std::string knownCamsPath() { return plat::joinPath(plat::exeDir(), "cameras-known.txt"); }
 
 // "aa-bb-cc-dd-ee-ff", "AABBCCDDEEFF", "aa:bb:..." -> "AABBCCDDEEFF"
 static std::string normMac(const std::string& raw) {
@@ -1400,37 +943,20 @@ static std::string macToText(const unsigned char b[6]) {
 // Strict: false when the address does not answer ARP, i.e. nothing is there.
 // Keeps us from creating sessions for cameras that are simply switched off.
 static bool arpLookup(CrInt32u ipLe, std::string& macOut) {
-    ULONG mac[2] = {0, 0};
-    ULONG len = 6;
-    if (::SendARP(static_cast<IPAddr>(ipLe), 0, mac, &len) != NO_ERROR || len != 6) return false;
-    macOut = macToText(reinterpret_cast<const unsigned char*>(mac));
+    unsigned char mac[6] = {0};
+    if (!plat::arpMac(static_cast<uint32_t>(ipLe), mac)) return false;
+    macOut = macToText(mac);
     return true;
-}
-
-// DHCP moved the camera? Find its current address by MAC in the neighbour table.
-static bool ipForMac(const std::string& wantMac, std::string& ipOut) {
-    const std::string want = normMac(wantMac);
-    if (want.size() != 12) return false;
-    PMIB_IPNET_TABLE2 tbl = nullptr;
-    if (GetIpNetTable2(AF_INET, &tbl) != NO_ERROR || !tbl) return false;
-    bool found = false;
-    for (ULONG i = 0; i < tbl->NumEntries && !found; ++i) {
-        const MIB_IPNET_ROW2& r = tbl->Table[i];
-        if (r.PhysicalAddressLength != 6) continue;
-        if (normMac(macToText(r.PhysicalAddress)) != want) continue;
-        char ip[64] = {0};
-        if (::inet_ntop(AF_INET, &r.Address.Ipv4.sin_addr, ip, sizeof(ip))) { ipOut = ip; found = true; }
-    }
-    FreeMibTable(tbl);
-    return found;
 }
 
 static std::vector<KnownCam> readKnownCams() {
     std::vector<KnownCam> out;
-    std::ifstream f(knownCamsPath());
-    if (!f) return out;
+    std::string text;
+    if (!plat::readFile(knownCamsPath(), text)) return out;
+    std::istringstream f(text);
     std::string line;
     while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty() && static_cast<unsigned char>(line[0]) == 0xEF) line.erase(0, 3);
         const size_t hash = line.find('#');
         if (hash != std::string::npos) line.erase(hash);
@@ -1443,8 +969,6 @@ static std::vector<KnownCam> readKnownCams() {
 }
 
 static void writeKnownCams(const std::vector<KnownCam>& cams) {
-    FILE* f = _wfsopen(knownCamsPath().c_str(), L"wb", _SH_DENYNO);
-    if (!f) return;
     static const char kHead[] =
         "\xEF\xBB\xBF"
         "# Этот файл SignalBox ведёт сам — править не нужно.\r\n"
@@ -1453,12 +977,10 @@ static void writeKnownCams(const std::vector<KnownCam>& cams) {
         "# частый случай при ширине канала 20/40 МГц на 2.4 ГГц), SignalBox\r\n"
         "# подключится к ним напрямую по сохранённому адресу.\r\n"
         "# Формат: MAC  IP  МОДЕЛЬ\r\n";
-    std::fwrite(kHead, 1, sizeof(kHead) - 1, f);
-    for (const KnownCam& k : cams) {
-        const std::string line = k.mac + "  " + k.ip + "  " + k.model + "\r\n";
-        std::fwrite(line.data(), 1, line.size(), f);
-    }
-    std::fclose(f);
+    std::string out(kHead, sizeof(kHead) - 1);
+    for (const KnownCam& k : cams)
+        out += k.mac + "  " + k.ip + "  " + k.model + "\r\n";
+    plat::writeFile(knownCamsPath(), out);
 }
 
 // Called whenever discovery sees a camera: upsert by MAC (or IP when no MAC).
@@ -1505,13 +1027,12 @@ static void reconnectKnownOnce(bool announce) {
 
         // Where is it now? Remembered address first, then look the MAC up.
         std::string ip = k.ip, mac;
-        IN_ADDR a{};
-        bool reachable = (::inet_pton(AF_INET, ip.c_str(), &a) == 1) &&
-                         arpLookup(static_cast<CrInt32u>(a.S_un.S_addr), mac);
+        uint32_t addr = 0;
+        bool reachable = plat::ipv4ToNumber(ip, addr) && arpLookup(static_cast<CrInt32u>(addr), mac);
         if (!reachable && normMac(k.mac).size() == 12) {
             std::string moved;
-            if (ipForMac(k.mac, moved) && ::inet_pton(AF_INET, moved.c_str(), &a) == 1 &&
-                arpLookup(static_cast<CrInt32u>(a.S_un.S_addr), mac)) {
+            if (plat::ipForMac(k.mac, moved) && plat::ipv4ToNumber(moved, addr) &&
+                arpLookup(static_cast<CrInt32u>(addr), mac)) {
                 ip = moved;
                 reachable = true;
                 consolePrintf("[known] %s сменила адрес: %s -> %s\n", k.model.c_str(), k.ip.c_str(), ip.c_str());
@@ -1528,10 +1049,10 @@ static void reconnectKnownOnce(bool announce) {
         }
 
         CrInt8u macBytes[6] = {0};
-        macForIp(static_cast<CrInt32u>(a.S_un.S_addr), macBytes);
+        macForIp(static_cast<CrInt32u>(addr), macBytes);
         SDK::ICrCameraObjectInfo* info = nullptr;
         const SDK::CrError err = SDK::CreateCameraObjectInfoEthernetConnection(
-            &info, model, static_cast<CrInt32u>(a.S_un.S_addr), macBytes, SDK::CrSSHsupport_OFF);
+            &info, model, static_cast<CrInt32u>(addr), macBytes, SDK::CrSSHsupport_OFF);
         if (CR_FAILED(err) || !info) {
             std::lock_guard<std::mutex> lk(s_warnMutex);
             if (s_warned["e:" + ip]++ == 0)
@@ -1561,15 +1082,12 @@ static void reconnectKnownOnce(bool announce) {
 // because "CAM N" is assigned in discovery order and shuffles between runs.
 static std::mutex g_groupsMutex;
 
-static std::wstring groupsPath() { return exeDir() + L"\\groups.json"; }
+static std::string groupsPath() { return plat::joinPath(plat::exeDir(), "groups.json"); }
 
 static std::string readGroupsJson() {
     std::lock_guard<std::mutex> lk(g_groupsMutex);
-    std::ifstream f(groupsPath(), std::ios::binary);
-    if (!f) return "{\"groups\":[]}";
     std::string s;
-    char buf[4096];
-    while (f.read(buf, sizeof(buf)) || f.gcount()) s.append(buf, static_cast<size_t>(f.gcount()));
+    if (!plat::readFile(groupsPath(), s)) return "{\"groups\":[]}";
     if (s.size() >= 3 && static_cast<unsigned char>(s[0]) == 0xEF) s.erase(0, 3);   // BOM
     if (s.find('{') == std::string::npos) return "{\"groups\":[]}";
     return s;
@@ -1577,11 +1095,7 @@ static std::string readGroupsJson() {
 
 static bool writeGroupsJson(const std::string& json) {
     std::lock_guard<std::mutex> lk(g_groupsMutex);
-    FILE* f = _wfsopen(groupsPath().c_str(), L"wb", _SH_DENYNO);
-    if (!f) return false;
-    std::fwrite(json.data(), 1, json.size(), f);
-    std::fclose(f);
-    return true;
+    return plat::writeFile(groupsPath(), json);
 }
 
 // Enumerate the network and add any camera not already tracked. Safe to call
@@ -1595,11 +1109,11 @@ static void discoverOnce(bool announce) {
     CrInt32u n = list->GetCount();
     for (CrInt32u i = 0; i < n; ++i) {
         const SDK::ICrCameraObjectInfo* info = list->GetCameraObjectInfo(i);
-        std::string mac = w2u(info->GetMACAddressChar());
-        std::string ip  = w2u(info->GetIPAddressChar());
+        std::string mac = plat::utf8FromWide(info->GetMACAddressChar());
+        std::string ip  = plat::utf8FromWide(info->GetIPAddressChar());
         std::string keyNew = mac.empty() ? ip : mac;
         // Запомнить: если в другой раз автопоиск её не увидит, подключимся по адресу.
-        rememberCamera(mac, ip, w2u(info->GetModel()));
+        rememberCamera(mac, ip, plat::utf8FromWide(info->GetModel()));
 
         std::string fm, where;
         bool addedNew = false;
@@ -1758,7 +1272,7 @@ static coll::HttpResponse handleCmd(const std::string& body) {
     return r;
 }
 
-static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std::wstring& wwwDir) {
+static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std::string& wwwDir) {
     coll::HttpResponse r;
 
     if (req.method == "GET" && req.path == "/status.json") {
@@ -1932,10 +1446,8 @@ static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std:
         if (rel.find("..") != std::string::npos) {        // path traversal guard
             r.status = 403; r.statusText = "Forbidden"; r.body = "forbidden"; return r;
         }
-        std::wstring wrel(rel.begin(), rel.end());
-        std::wstring full = wwwDir + L"\\" + wrel;
         std::string data;
-        if (readFileBinary(full, data)) {
+        if (readFileBinary(plat::joinPath(wwwDir, rel), data)) {
             r.contentType = contentTypeFor(rel);
             r.body = std::move(data);
             return r;
@@ -1965,21 +1477,13 @@ static void toggleRecAll(const char* src) {
                   src, start ? "Старт" : "Стоп", ok, targets.size());
 }
 
-// winmm calls this from a system thread — do the minimum (enqueue) here; the
-// worker thread does the real work (SDK calls must not run in this callback).
-static void CALLBACK midiCallback(HMIDIIN, UINT wMsg, DWORD_PTR, DWORD_PTR dwParam1, DWORD_PTR) {
-    if (wMsg != MIM_DATA) return;
-    { std::lock_guard<std::mutex> lk(g_midiMx); g_midiQ.push_back(static_cast<DWORD>(dwParam1)); }
-    g_midiCv.notify_one();
-}
-
-// Consumes MIDI messages: logs them and toggles recording on the mapped key.
+// Consumes MIDI messages: toggles recording on the mapped key.
 // Mapped key: Control Change, channel 1 (status 0xB0), controller #17.
 static void midiWorker() {
     using clk = std::chrono::steady_clock;
     clk::time_point lastTrig{};
     while (true) {
-        DWORD msg = 0;
+        unsigned msg = 0;
         {
             std::unique_lock<std::mutex> lk(g_midiMx);
             g_midiCv.wait_for(lk, 200ms, [] { return !g_midiQ.empty() || !g_running.load(); });
@@ -1999,32 +1503,16 @@ static void midiWorker() {
     }
 }
 
+// Драйвер зовёт нас из системного потока — там делаем минимум (кладём в очередь),
+// всю работу берёт midiWorker: вызовы SDK в этом колбэке недопустимы.
 static void startMidi() {
-    UINT n = midiInGetNumDevs();
-    if (n == 0) {
-        consolePrintf("[midi] MIDI-устройств не найдено. Подключи контроллер и нажми r+Enter.\n");
-        return;
-    }
-    consolePrintf("[midi] MIDI-входов: %u\n", n);
-    for (UINT i = 0; i < n; ++i) {
-        MIDIINCAPS caps{};
-        if (midiInGetDevCaps(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
-            char name[160] = {0};
-            WideCharToMultiByte(CP_UTF8, 0, caps.szPname, -1, name, sizeof(name), nullptr, nullptr);
-            consolePrintf("   [%u] %s\n", i, name);
-        }
-        HMIDIIN h = nullptr;
-        if (midiInOpen(&h, i, reinterpret_cast<DWORD_PTR>(midiCallback), 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR) {
-            midiInStart(h);
-            g_midiIn.push_back(h);
-        }
-    }
-    consolePrintf("[midi] Запись переключается MIDI-кнопкой: CC #17, канал 1 (тумблер старт/стоп на всех).\n");
-}
-
-static void stopMidi() {
-    for (HMIDIIN h : g_midiIn) { midiInStop(h); midiInReset(h); midiInClose(h); }
-    g_midiIn.clear();
+    const bool ok = plat::midiStart([](unsigned status, unsigned d1, unsigned d2) {
+        { std::lock_guard<std::mutex> lk(g_midiMx);
+          g_midiQ.push_back(status | (d1 << 8) | (d2 << 16)); }
+        g_midiCv.notify_one();
+    });
+    if (ok)
+        consolePrintf("[midi] Запись переключается MIDI-кнопкой: CC #17, канал 1 (тумблер старт/стоп на всех).\n");
 }
 
 // Тянет кадры только для камер с открытым превью (запрос /liveview за последние
@@ -2065,31 +1553,32 @@ static void liveViewWorker() {
 }
 
 int main() {
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCtrlHandler(ctrlHandler, TRUE);
+    plat::init();
+    plat::onInterrupt([] { g_running.store(false); });   // Ctrl+C / закрытие окна: просто выход
+    plat::setLogger([](const std::string& s) { writeConsoleUtf8(s); });
 
     // Work from the exe directory so the SDK finds Cr_Core.dll + CrAdapter/.
-    const std::wstring dir = exeDir();
-    SetCurrentDirectoryW(dir.c_str());
+    const std::string dir = plat::exeDir();
+    plat::setWorkingDir(dir);
 
-    const std::wstring cmdLine = GetCommandLineW();
+    const std::string cmdLine = plat::commandLine();
 
     // Elevated one-shot: add the firewall rules and exit. Must come before the
     // single-instance guard — the normal copy is running and holding the slot.
-    if (cmdLine.find(L"--firewall") != std::wstring::npos)
-        return addFirewallRules(exeFullPath()) ? 0 : 1;
+    if (cmdLine.find("--firewall") != std::string::npos)
+        return plat::firewallAddRulesForSelf() ? 0 : 1;
 
     // Установщик обновления: тоже до гарда — основной экземпляр ещё жив и держит слот.
-    if (cmdLine.find(L"--apply-update") != std::wstring::npos)
+    if (cmdLine.find("--apply-update") != std::string::npos)
         return applyUpdate(cmdLine);
 
     // Set by the relaunch in the shutdown path: the browser already shows the
     // panel, so don't open another tab.
-    const bool relaunched = cmdLine.find(L"--restarted") != std::wstring::npos;
+    const bool relaunched = cmdLine.find("--restarted") != std::string::npos;
 
     // Before touching the log: a second copy must not rotate the running one's
     // log file. Just show the user the panel of the instance already running.
-    if (!acquireSingleInstance(relaunched)) {
+    if (!plat::acquireSingleInstance(kInstanceName, relaunched)) {
         openPanelInBrowser();
         return 0;
     }
@@ -2121,13 +1610,7 @@ int main() {
                 std::this_thread::sleep_for(1s);
         }
     }).detach();
-    const std::wstring wwwDir = dir + L"\\www";
-
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        consolePrintf("WSAStartup failed.\n");
-        return 1;
-    }
+    const std::string wwwDir = plat::joinPath(dir, "www");
 
     consolePrintf("SignalBox — сборщик статуса камер Sony\n");
 
@@ -2136,7 +1619,7 @@ int main() {
         consolePrintf("Окно закроется через 8 секунд...\n");
         std::this_thread::sleep_for(std::chrono::seconds(8));
         SDK::Release();
-        WSACleanup();
+        plat::shutdown();
         return 1;
     }
 
@@ -2158,7 +1641,7 @@ int main() {
         consolePrintf("Окно закроется через 8 секунд...\n");
         std::this_thread::sleep_for(std::chrono::seconds(8));
         SDK::Release();
-        WSACleanup();
+        plat::shutdown();
         return 1;
     }
 
@@ -2237,23 +1720,38 @@ int main() {
     consolePrintf("\nИщу камеры в сети, подключаюсь автоматически (подтверждай связывание на камерах).\n");
     consolePrintf("Перезапуск и выключение — кнопками на самой панели.\n\n");
 
-    std::thread trayThr(trayWorker);     // tray icon: open panel / restart / quit
+    // HTTP-сервер уходит в рабочий поток, а главный отдаётся циклу событий ОС:
+    // значок в трее должен жить именно на главном потоке (на macOS это требование
+    // AppKit, на Windows — просто так же удобно).
+    std::thread serverThr([&]() {
+        server.run([&](const coll::HttpRequest& req) { return handleRequest(req, wwwDir); },
+                   g_running);
+    });
 
     if (!relaunched) openPanelInBrowser();
 
-    server.run([&](const coll::HttpRequest& req) { return handleRequest(req, wwwDir); },
-               g_running);
+    plat::TrayActions tray;
+    tray.onOpenPanel = []{ openPanelInBrowser(); };
+    tray.onRestart   = []{ requestRestart(); };            // то же, что кнопка на панели
+    tray.onQuit      = []{ g_running.store(false); };      // тот же чистый путь, что 'q'
+    plat::runEventLoop(tray, []{ return g_running.load(); });
 
     // ---- shutdown ----
+    g_running.store(false);
+    // Сначала дать серверу доработать текущий запрос и выйти из цикла, и только
+    // потом закрывать сокет — иначе закрываем дескриптор под чужим select().
+    // ⚠ Ждать сервер надо ДО запуска сторожа: браузер держит открытые соединения,
+    // и приём последнего запроса может занять до 4 с (SO_RCVTIMEO). Пока это
+    // ожидание было внутри восьмисекундного окна, штатное выключение не
+    // укладывалось и процесс каждый раз добивался принудительно.
+    if (serverThr.joinable()) serverThr.join();
+    server.stop();
+
     consolePrintf("\nОстановка...\n");
     startShutdownWatchdog(8);            // never let a stuck SDK call strand the process
-    g_running.store(false);
-    server.stop();
-    if (g_trayWnd) PostMessageW(g_trayWnd, WM_CLOSE, 0, 0);
-    if (trayThr.joinable()) trayThr.join();
     if (poller.joinable())     poller.join();
     if (discoverer.joinable()) discoverer.join();
-    stopMidi();                 // stop MIDI callbacks before joining the worker
+    plat::midiStop();           // stop MIDI callbacks before joining the worker
     g_midiCv.notify_all();      // wake the worker so it can observe g_running=false
     if (midiThr.joinable())     midiThr.join();
     if (lvThr.joinable())       lvThr.join();
@@ -2276,9 +1774,9 @@ int main() {
         g_cams.clear();
     }
     SDK::Release();
-    WSACleanup();
+    plat::shutdown();
 
-    trayRemove();                        // don't leave a ghost icon in the tray
+    plat::removeTrayIcon();              // don't leave a ghost icon in the tray
     if (g_restart.load()) {
         relaunchSelf();
     } else {

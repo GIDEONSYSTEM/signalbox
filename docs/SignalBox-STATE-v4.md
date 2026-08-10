@@ -1,7 +1,8 @@
 # SignalBox — состояние проекта v4 (handoff для ассистента)
 
 > **Кому.** Написано для Claude, чтобы в новом чате мгновенно поднять контекст и продолжить.
-> Выжимка на **2026-08-07**, версия приложения **1.0.5**. **Заменяет `SignalBox-STATE-v3.md`.**
+> Выжимка на **2026-08-10**, версия приложения **1.0.5**. **Заменяет `SignalBox-STATE-v3.md`.**
+> 2026-08-10: выделен **платформенный слой** — см. §14. Разделы 1 и 3 обновлены под него.
 > Файл самодостаточен: на другой машине памяти Claude Code нет.
 > Работа — на **студийном Windows-ПК**, где стоят SDK, OBS и подключены камеры.
 
@@ -37,7 +38,9 @@ cmake --build "…\CamCollector\build" --config Release
 Полный путь к cmake (его нет в PATH):
 `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`
 
-Линкует: `Cr_Core ws2_32 winmm shell32 iphlpapi ole32 oleaut32 winhttp`.
+Линкует: `Cr_Core`, а под Windows дополнительно `ws2_32 winmm shell32 iphlpapi ole32 oleaut32
+winhttp` — **эти библиотеки нужны только платформенному слою** (§14), поэтому в CMake они под
+`if(WIN32)`. Там же выбирается файл реализации слоя и Windows-ресурс со значком (`res/app.rc`).
 **Перед пересборкой выключить SignalBox** (кнопка на панели или трей), иначе LNK1104.
 Правки в `www\` пересборки НЕ требуют — сервер читает файлы с диска.
 
@@ -88,8 +91,12 @@ Get-NetTCPConnection -LocalPort 8787 -State Listen | %{ (Get-Process -Id $_.Owni
 ⚠️ `[System.IO.File]::ReadAllText` лог на живой программе НЕ прочитает — читать `Get-Content`
 или явным `FileShare.ReadWrite`.
 
-**Значок в трее.** `trayWorker()`: message-only окно (`SignalBoxTrayWnd`, родитель `HWND_MESSAGE`)
-+ `Shell_NotifyIconW`. Меню: открыть панель / перезапустить / выключить.
+**Значок в трее и главный поток.** `plat::runEventLoop()` (в слое): message-only окно
+(`SignalBoxTrayWnd`, родитель `HWND_MESSAGE`) + `Shell_NotifyIconW`, меню — открыть панель /
+перезапустить / выключить. Цикл просыпается раз в 150 мс и смотрит `g_running`.
+🔴 **Цикл событий крутится на ГЛАВНОМ потоке, HTTP-сервер — в рабочем** (до 2026-08-10 было
+наоборот). Причина: на macOS status bar item поднимается только с главного потока, иначе порт
+пришлось бы выворачивать наизнанку.
 ⚠️ **Проверять значок через `FindWindow*` нельзя** — message-only окна так не находятся
 (дважды получал ложное «нет»). Достоверно — строки лога `[tray] …`; пункты меню тестировать
 посылкой `WM_COMMAND` с id в hwnd из лога.
@@ -102,6 +109,11 @@ Get-NetTCPConnection -LocalPort 8787 -State Listen | %{ (Get-Process -Id $_.Owni
 **Сторож завершения.** `startShutdownWatchdog(8)` → через 8с `TerminateProcess`. Нужен потому,
 что `poller.join()`/`discoverer.join()` могут висеть внутри блокирующего SDK `Connect()` к
 несвязанной камере — так появлялись **зомби-процессы** (порт освобождён, процесс жив).
+🔴 **Порядок в конце `main()` важен:** сначала дождаться потока сервера и закрыть сокет, и только
+ПОТОМ заводить сторожа. Браузер держит открытые соединения, приём последнего запроса занимает
+до 4с (`SO_RCVTIMEO`); пока это ожидание было внутри восьмисекундного окна, штатное выключение
+не укладывалось и процесс каждый раз добивался принудительно (замерено: 8.2с и «затянулось»
+против 1.0с и «Готово.»).
 
 **Брандмауэр.** `maybeOfferFirewallRules()` через COM `INetFwPolicy2` ищет входящее Allow-правило
 на свой exe; нет — MessageBox, при согласии `ShellExecuteExW("runas", "--firewall")` → UAC →
@@ -290,10 +302,9 @@ Live Preview с рамками и поворотом. **Mic Gain скрывае�
 **Mac Apple Silicon.** SDK Sony официально поддерживает macOS (отдельный пакет с их сайта;
 есть ли нативная сборка под arm64 — по локальной доке не видно, смотреть на сайте Sony).
 **Панель переносится без правок** — это чистый HTML. Логика камер переносима концептуально.
-А вот платформенная обвязка написана под Windows целиком: HTTP-сервер на Winsock, WinHTTP,
-трей, брандмауэр, MIDI, мьютекс, `tar.exe`/`robocopy`. Пока проект небольшой, **дёшево вынести
-платформенное в отдельный слой** — тогда порт станет «написать одну реализацию», а не
-распутывать всё.
+✅ **Платформенная обвязка вынесена в отдельный слой 2026-08-10 (см. §14)** — порт теперь
+«написать одну реализацию `PlatformMac.mm`», а не распутывать Windows-вызовы по всему проекту.
+Осталось выяснить по сайту Sony, есть ли нативная сборка SDK под arm64.
 
 ⚠️ **Юридическое:** перед продажами прочитать `Camera_Remote_SDK_Readme_v2.01.00.pdf` в корне SDK
 — там условия Sony про распространение их DLL и коммерческое использование. Текст из PDF
@@ -360,3 +371,47 @@ Live Preview с рамками и поворотом. **Mic Gain скрывае�
 `C:\Users\212_studio\.claude\projects\X--Desktop-Gideon-Sony\memory\`:
 `phase2-collector.md`, `sdk-api-reference.md`, `remotecli-build.md`.
 В другом чате/на другой машине их нет — поэтому этот файл самодостаточен.
+
+## 14. Платформенный слой (2026-08-10)
+
+Всё, что зависит от ОС, вынесено за интерфейс `src/platform/Platform.h`; реализация — один файл
+на ОС (`PlatformWin.cpp`). **Порт на macOS = написать `PlatformMac.mm` и добавить его в
+CMakeLists**, остальной код не трогать. Проверено грепом: вне `src/platform/` не осталось ни
+`windows.h`, ни `wstring`, ни winsock/WinHTTP/COM.
+
+**Правила слоя:** в `Platform.h` нет системных заголовков; все строки и пути — **UTF-8
+`std::string`** (конверсия в `wchar_t` спрятана внутри реализации); функции не бросают исключений.
+Заодно ушёл `std::ifstream(std::wstring)` — это расширение MSVC, которого нет нигде больше.
+
+**Что обязана дать реализация под новую ОС:**
+
+| Группа | Функции | Замечания для macOS |
+|---|---|---|
+| Старт | `init`/`shutdown`/`onInterrupt`/`setLogger` | у слоя своего лога нет — пишет через `setLogger` |
+| Пути и файлы | `exePath`/`exeDir`/`tempDir`/`joinPath`/`fileExists`/`makeDir`/`removeTree`/`readFile`/`writeFile`/`replaceFile`/`openForSharedWrite`/`setWorkingDir` | `_NSGetExecutablePath`; лог должен оставаться читаемым на живой программе |
+| Архив | `extractArchive`, `copyTree` | на Windows — `tar.exe` и `robocopy /E` (без `/PURGE`: данные студии не стирать) |
+| Консоль | `writeConsole` | |
+| Процессы | `commandLine`/`currentPid`/`waitForProcess`/`launch`/`runAndWait`/`terminateSelf` | |
+| Один экземпляр | `acquireSingleInstance`/`releaseSingleInstance` | на Windows мьютекс; на macOS — файл-замок |
+| Оболочка | `openUrl`/`askYesNo`/`computerName` | `open`, `NSAlert` |
+| Сеть | `listIPv4Interfaces`/`hostIPv4Addresses`/`ipv4ToNumber`/`arpMac`/`ipForMac` | `getifaddrs`; ARP — `sysctl(NET_RT_FLAGS)`. **Веса адресов считает `main.cpp`, слой отдаёт только факты** |
+| HTTP-клиент | `httpGet` | на Windows WinHTTP; на macOS `NSURLSession`/`curl` |
+| Трей и цикл | `runEventLoop`/`removeTrayIcon` | ТОЛЬКО главный поток; нет значка — всё равно ждать `keepRunning()` |
+| MIDI | `midiStart`/`midiStop` | CoreMIDI; необязательно — можно вернуть `false` |
+| Брандмауэр | `firewallSupported`/`firewallHasRuleForSelf`/`firewallAddRulesForSelf`/`firewallRequestElevatedAdd` | понятия нет — вернуть `false` у `firewallSupported`, приложение не спросит |
+
+**`HttpServer.h`** намеренно НЕ в слое: сокеты BSD одинаковы везде, различий на десяток строк, и
+они собраны в шим в начале файла (`Socket`, `closeSocket`, `sendAll`, `recvSome`,
+`setRecvTimeout`, `setNoSigPipe`). ⚠️ Ветка POSIX **написана, но ни разу не компилировалась**.
+`setNoSigPipe` там не для красоты: без `SO_NOSIGPIPE` запись в закрытое клиентом соединение
+убивает весь процесс сигналом.
+
+**Байт-порядок IP** (`ipv4ToNumber`) — как раньше: 1-й октет в младший байт, `0x0500A8C0` для
+192.168.0.5. Это то, что даёт `inet_pton` на little-endian, а и Windows x64, и Apple Silicon
+такие. `htonl` не нужен.
+
+🐞 **Найдено попутно, НЕ исправлено:** диагностика `CameraSession` (`clog`) пишет только в
+консоль, а её в GUI-подсистеме нет — значит, все сообщения о подключении камер и ошибках SDK
+сейчас теряются. В лог они не попадают (в отличие от `consolePrintf` из `main.cpp`). Чинится
+двумя строками — направить `clog` в тот же приёмник.
+

@@ -1,6 +1,6 @@
 #include "CameraSession.h"
+#include "platform/Platform.h"
 
-#include <windows.h>
 #include <chrono>
 #include <thread>
 #include <cstdarg>
@@ -17,14 +17,8 @@ using namespace std::chrono_literals;
 
 namespace {
 
-std::string wideToUtf8(const wchar_t* w) {
-    if (!w) return std::string();
-    int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 1) return std::string();
-    std::string out(static_cast<size_t>(len - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, &out[0], len, nullptr, nullptr);
-    return out;
-}
+// SDK Sony отдаёт строки в wchar_t — это единственное место, где он тут нужен.
+std::string wideToUtf8(const wchar_t* w) { return plat::utf8FromWide(w); }
 
 constexpr std::uint32_t kIsoValueMask = 0x00FFFFFF;
 constexpr std::uint32_t kIsoAutoValue = 0x00FFFFFF;   // value-part meaning AUTO
@@ -79,7 +73,8 @@ long long nowMs() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-// Console log as real Unicode (UTF-16) — code-page independent (SDK resets it).
+// Диагностика в консоль (плат. слой печатает настоящим Unicode, независимо от
+// кодовой страницы, которую сбрасывает SDK).
 void clog(const char* fmt, ...) {
     char buf[1024];
     va_list ap; va_start(ap, fmt);
@@ -87,18 +82,7 @@ void clog(const char* fmt, ...) {
     va_end(ap);
     if (n < 0) return;
     size_t len = (static_cast<size_t>(n) < sizeof(buf)) ? static_cast<size_t>(n) : sizeof(buf) - 1;
-    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD mode;
-    if (GetConsoleMode(h, &mode)) {
-        int wl = MultiByteToWideChar(CP_UTF8, 0, buf, static_cast<int>(len), nullptr, 0);
-        if (wl > 0) {
-            std::wstring w(static_cast<size_t>(wl), L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, buf, static_cast<int>(len), &w[0], wl);
-            DWORD wr; WriteConsoleW(h, w.c_str(), static_cast<DWORD>(w.size()), &wr, nullptr);
-        }
-    } else {
-        DWORD wr; WriteFile(h, buf, static_cast<DWORD>(len), &wr, nullptr);
-    }
+    plat::writeConsole(std::string(buf, len));
 }
 
 } // namespace

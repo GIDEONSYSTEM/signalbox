@@ -1,12 +1,25 @@
 #pragma once
-// Tiny blocking HTTP/1.1 server for localhost (Winsock). Enough for serving
-// a couple of static files, GET /status.json and POST /cmd. Not a general server.
+// Tiny blocking HTTP/1.1 server for localhost. Enough for serving a couple of
+// static files, GET /status.json and POST /cmd. Not a general server.
+//
+// Сокеты BSD одинаковы везде; различий ровно на десяток строк, и они собраны
+// в шим ниже — отдельная реализация в платформенном слое того не стоит.
+// ⚠ Ветка POSIX на macOS ещё НЕ компилировалась.
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
+#ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+#else
+  #include <arpa/inet.h>
+  #include <netinet/in.h>
+  #include <sys/select.h>
+  #include <sys/socket.h>
+  #include <sys/time.h>
+  #include <unistd.h>
 #endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
 
 #include <atomic>
 #include <cctype>
@@ -16,6 +29,43 @@
 #include <string>
 
 namespace coll {
+
+// ---- сокетный шим ----
+#ifdef _WIN32
+using Socket = SOCKET;
+inline constexpr Socket kInvalidSocket = INVALID_SOCKET;
+inline void closeSocket(Socket s)                 { ::closesocket(s); }
+inline int  sendAll(Socket s, const char* p, size_t n) {
+    return ::send(s, p, static_cast<int>(n), 0);
+}
+inline int  recvSome(Socket s, char* p, size_t n) { return ::recv(s, p, static_cast<int>(n), 0); }
+inline void setRecvTimeout(Socket s, int ms) {
+    DWORD t = static_cast<DWORD>(ms);
+    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&t), sizeof(t));
+}
+inline void setNoSigPipe(Socket)                  {}   // на Windows SIGPIPE нет
+#else
+using Socket = int;
+inline constexpr Socket kInvalidSocket = -1;
+inline void closeSocket(Socket s)                 { ::close(s); }
+inline int  sendAll(Socket s, const char* p, size_t n) {
+    return static_cast<int>(::send(s, p, n, 0));
+}
+inline int  recvSome(Socket s, char* p, size_t n) { return static_cast<int>(::recv(s, p, n, 0)); }
+inline void setRecvTimeout(Socket s, int ms) {
+    timeval t{};
+    t.tv_sec  = ms / 1000;
+    t.tv_usec = (ms % 1000) * 1000;
+    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof(t));
+}
+// Без этого запись в закрытое клиентом соединение убивает весь процесс сигналом.
+inline void setNoSigPipe(Socket s) {
+  #ifdef SO_NOSIGPIPE
+    int on = 1;
+    ::setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+  #endif
+}
+#endif
 
 struct HttpRequest {
     std::string method;
@@ -45,9 +95,9 @@ public:
     void stop();
 
 private:
-    void handleClient(SOCKET client, const HttpHandler& handler);
+    void handleClient(Socket client, const HttpHandler& handler);
 
-    SOCKET m_listen = INVALID_SOCKET;
+    Socket m_listen = kInvalidSocket;
 };
 
 // ---- implementation (header-only) ----
@@ -69,9 +119,9 @@ inline std::string httpReasonHeaders(const HttpResponse& r) {
 
 inline bool HttpServer::start(unsigned short port) {
     m_listen = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (m_listen == INVALID_SOCKET) return false;
+    if (m_listen == kInvalidSocket) return false;
 
-    BOOL yes = TRUE;
+    int yes = 1;
     ::setsockopt(m_listen, SOL_SOCKET, SO_REUSEADDR,
                  reinterpret_cast<const char*>(&yes), sizeof(yes));
 
@@ -80,23 +130,19 @@ inline bool HttpServer::start(unsigned short port) {
     addr.sin_port        = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);   // all interfaces -> reachable from LAN (phone)
 
-    if (::bind(m_listen, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-        ::closesocket(m_listen);
-        m_listen = INVALID_SOCKET;
-        return false;
-    }
-    if (::listen(m_listen, SOMAXCONN) == SOCKET_ERROR) {
-        ::closesocket(m_listen);
-        m_listen = INVALID_SOCKET;
+    if (::bind(m_listen, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0 ||
+        ::listen(m_listen, SOMAXCONN) < 0) {
+        closeSocket(m_listen);
+        m_listen = kInvalidSocket;
         return false;
     }
     return true;
 }
 
 inline void HttpServer::stop() {
-    if (m_listen != INVALID_SOCKET) {
-        ::closesocket(m_listen);
-        m_listen = INVALID_SOCKET;
+    if (m_listen != kInvalidSocket) {
+        closeSocket(m_listen);
+        m_listen = kInvalidSocket;
     }
 }
 
@@ -109,29 +155,29 @@ inline void HttpServer::run(const HttpHandler& handler, std::atomic<bool>& runni
         tv.tv_sec  = 0;
         tv.tv_usec = 200000; // 200ms so we can re-check `running`
 
-        int sel = ::select(0, &rfds, nullptr, nullptr, &tv);
+        // Первый аргумент важен только для POSIX; Windows его игнорирует.
+        int sel = ::select(static_cast<int>(m_listen) + 1, &rfds, nullptr, nullptr, &tv);
         if (sel <= 0) continue;
         if (!FD_ISSET(m_listen, &rfds)) continue;
 
-        SOCKET client = ::accept(m_listen, nullptr, nullptr);
-        if (client == INVALID_SOCKET) continue;
+        Socket client = ::accept(m_listen, nullptr, nullptr);
+        if (client == kInvalidSocket) continue;
 
-        DWORD timeoutMs = 4000;
-        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
-                     reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+        setRecvTimeout(client, 4000);
+        setNoSigPipe(client);
         handleClient(client, handler);
-        ::closesocket(client);
+        closeSocket(client);
     }
 }
 
-inline void HttpServer::handleClient(SOCKET client, const HttpHandler& handler) {
+inline void HttpServer::handleClient(Socket client, const HttpHandler& handler) {
     std::string buf;
     char tmp[4096];
 
     // Read until we have the full header block.
     size_t headerEnd = std::string::npos;
     while (true) {
-        int got = ::recv(client, tmp, sizeof(tmp), 0);
+        int got = recvSome(client, tmp, sizeof(tmp));
         if (got <= 0) { if (buf.empty()) return; break; }
         buf.append(tmp, static_cast<size_t>(got));
         headerEnd = buf.find("\r\n\r\n");
@@ -177,7 +223,7 @@ inline void HttpServer::handleClient(SOCKET client, const HttpHandler& handler) 
     size_t bodyStart = headerEnd + 4;
     std::string body = buf.substr(bodyStart);
     while (body.size() < contentLength) {
-        int got = ::recv(client, tmp, sizeof(tmp), 0);
+        int got = recvSome(client, tmp, sizeof(tmp));
         if (got <= 0) break;
         body.append(tmp, static_cast<size_t>(got));
     }
@@ -196,8 +242,7 @@ inline void HttpServer::handleClient(SOCKET client, const HttpHandler& handler) 
     std::string out = httpReasonHeaders(res) + res.body;
     size_t sent = 0;
     while (sent < out.size()) {
-        int n = ::send(client, out.data() + sent,
-                       static_cast<int>(out.size() - sent), 0);
+        int n = sendAll(client, out.data() + sent, out.size() - sent);
         if (n <= 0) break;
         sent += static_cast<size_t>(n);
     }

@@ -11,12 +11,25 @@ if(NOT EXISTS "${CRSDK_INC}/CameraRemote_SDK.h")
                         "Expected SignalBox next to RemoteCli.")
 endif()
 
+# Платформенный слой: интерфейс общий, реализация — по одной на ОС.
+# Порт на macOS = добавить сюда PlatformMac.mm, остальной код не трогать.
+if(WIN32)
+    set(PLATFORM_SOURCES
+        src/platform/PlatformWin.cpp
+        res/app.rc)       # значок приложения — ресурс Windows
+elseif(APPLE)
+    set(PLATFORM_SOURCES src/platform/PlatformMac.mm)
+else()
+    message(FATAL_ERROR "Нет реализации платформенного слоя для этой ОС (см. src/platform/Platform.h)")
+endif()
+
 add_executable(SignalBox
     src/main.cpp
     src/CameraSession.cpp
     src/CameraSession.h
     src/HttpServer.h
-    res/app.rc            # embeds the Wi-Fi application icon
+    src/platform/Platform.h
+    ${PLATFORM_SOURCES}
 )
 
 set_target_properties(SignalBox PROPERTIES
@@ -48,7 +61,11 @@ if(NOT CR_CORE_LIB)
     message(FATAL_ERROR "Cr_Core.lib not found in ${CRSDK_LIBDIR}")
 endif()
 
-target_link_libraries(SignalBox PRIVATE ${CR_CORE_LIB} ws2_32 winmm shell32 iphlpapi ole32 oleaut32 winhttp)
+target_link_libraries(SignalBox PRIVATE ${CR_CORE_LIB})
+if(WIN32)
+    # Всё это тянет ТОЛЬКО платформенный слой Windows (src/platform/PlatformWin.cpp).
+    target_link_libraries(SignalBox PRIVATE ws2_32 winmm shell32 iphlpapi ole32 oleaut32 winhttp)
+endif()
 
 # Ship the MSVC runtime next to the exe (app-local deployment) so SignalBox starts on a
 # clean PC with no Visual C++ Redistributable installed. Needed not just by our exe:
