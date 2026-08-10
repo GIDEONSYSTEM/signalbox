@@ -312,6 +312,48 @@
   .lv-toggles{display:flex; gap:16px; margin-top:8px;}
   .lv-toggles .lv-fr{margin-top:0;}
 
+  /* шапка: слева логотип и шестерёнка */
+  .head-l{display:flex; align-items:center; gap:8px;}
+  .icobtn.gear{color:var(--idle);}
+  .icobtn.gear:hover{color:var(--ink);}
+
+  /* окно настроек поверх панели */
+  .settings{position:fixed; inset:0; z-index:80; display:none;
+            align-items:center; justify-content:center; padding:20px;
+            background:rgba(6,8,11,.72);}
+  .settings.show{display:flex;}
+  .set-card{display:flex; width:min(760px,100%); max-height:min(560px,90vh);
+            background:var(--panel); border:1px solid var(--edge); border-radius:14px;
+            overflow:hidden; box-shadow:0 24px 70px rgba(0,0,0,.55);}
+  .set-side{flex:none; width:186px; background:rgba(255,255,255,.02);
+            border-right:1px solid var(--edge); padding:14px 10px; display:flex;
+            flex-direction:column; gap:3px;}
+  .set-title{font-family:var(--cond); font-weight:700; letter-spacing:.1em; font-size:11px;
+             text-transform:uppercase; color:var(--ink-dim); padding:2px 8px 10px;}
+  .set-nav{text-align:left; background:none; border:none; border-radius:8px; cursor:pointer;
+           padding:8px 10px; color:var(--ink-dim); font-family:var(--ui); font-size:13px;}
+  .set-nav:hover{background:rgba(255,255,255,.05); color:var(--ink);}
+  .set-nav.on{background:rgba(65,214,126,.12); color:var(--ok);}
+  .set-main{flex:1 1 auto; min-width:0; position:relative; padding:16px 18px 18px; overflow:auto;}
+  .set-close{position:absolute; top:12px; right:12px; background:none; border:none;
+             color:var(--idle); cursor:pointer; font-size:16px; line-height:1;
+             padding:4px 7px; border-radius:7px;}
+  .set-close:hover{color:var(--ink); background:rgba(255,255,255,.07);}
+  .set-pane{display:none;}
+  .set-pane.on{display:block;}
+  .set-h{font-family:var(--cond); font-weight:700; letter-spacing:.07em; font-size:12px;
+         text-transform:uppercase; color:var(--ink); margin:0 30px 6px 0;}
+  .set-note{font-size:11px; line-height:1.5; color:var(--idle); margin-bottom:11px;}
+  /* внутри настроек блоки занимают всю ширину окна */
+  .set-pane .share, .set-pane .upd{max-width:none; margin:0;}
+  @media (max-width:640px){
+    .set-card{flex-direction:column; max-height:92vh;}
+    .set-side{width:auto; flex-direction:row; overflow-x:auto; border-right:none;
+              border-bottom:1px solid var(--edge); padding:8px;}
+    .set-title{display:none;}
+    .set-nav{white-space:nowrap;}
+  }
+
   /* метка «есть новая версия» — в шапке, видна всегда */
   .upd-flag{display:none; align-items:center; justify-content:center; gap:3px;
             height:26px; padding:0 8px; border-radius:7px; cursor:pointer;
@@ -378,7 +420,16 @@
 <body>
 <div id="app">
   <div class="head">
-    <div class="title">SignalBox</div>
+    <div class="head-l">
+      <div class="title">SignalBox</div>
+      <button class="icobtn gear" id="setBtn" title="Настройки" aria-label="Настройки">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3.2"/>
+          <path d="M19.4 15a1.6 1.6 0 0 0 .32 1.77l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-1 1.47V21a2 2 0 1 1-4 0v-.09a1.6 1.6 0 0 0-1.05-1.47 1.6 1.6 0 0 0-1.77.32l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-1H3a2 2 0 1 1 0-4h.09A1.6 1.6 0 0 0 4.56 9a1.6 1.6 0 0 0-.32-1.77l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.6 1.6 0 0 0 1.77.32H9a1.6 1.6 0 0 0 1-1.47V3a2 2 0 1 1 4 0v.09a1.6 1.6 0 0 0 1 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.6 1.6 0 0 0-.32 1.77V9a1.6 1.6 0 0 0 1.47 1H21a2 2 0 1 1 0 4h-.09a1.6 1.6 0 0 0-1.47 1z"/>
+        </svg>
+      </button>
+    </div>
     <div class="head-r">
       <button class="upd-flag" id="updFlag" title="Доступна новая версия — нажми, чтобы перейти к обновлению">
         <span class="a">↑</span><span id="updFlagVer"></span>
@@ -405,45 +456,75 @@
   <div class="grp bare" id="ungrouped">
     <div class="grp-body" id="ungroupedBody" data-body=""></div>
   </div>
-  <div class="share">
-    <div class="share-txt">
-      <div class="share-cap">Доступ к панели с других устройств</div>
-      <button class="share-url" id="shareUrl" title="Нажми — скопировать адрес">—</button>
-    </div>
-    <div class="share-qr" id="shareQr" title="Нажми — увеличить QR для сканирования"></div>
-  </div>
-  <details class="ipbox" id="ipBox">
-    <summary>Добавить камеру по IP <span class="arw">▸</span></summary>
-    <div class="ip-hint">
-      Нужно, только если камера не появляется сама: сеть не пропускает автопоиск
-      (отдельный SSID 2.4 ГГц, гостевая сеть или изоляция клиентов на роутере).
-      Адрес камеры: Меню → Сеть → Wi-Fi → Отобр. инф. Wi-Fi.
-    </div>
-    <div class="ip-form">
-      <input type="text" id="ipInput" placeholder="192.168.1.55" inputmode="decimal" autocomplete="off">
-      <select id="ipModel"></select>
-      <label class="ip-ssh" title="Отметь, только если на камере включена аутентификация доступа">
-        <input type="checkbox" id="ipSsh">SSH
-      </label>
-      <button class="ip-add" id="ipAdd">Добавить</button>
-    </div>
-    <div class="ip-list" id="ipList"></div>
-  </details>
-  <div class="upd" id="updBox">
-    <div class="upd-new" id="updNew">
-      <span class="t" id="updMsg"></span>
-      <button class="upd-btn go" id="updGo">Обновить</button>
-    </div>
-    <div class="upd-line">
-      <span class="upd-ver" id="updVer">SignalBox</span>
-      <label class="upd-auto" title="Ставить обновления сразу при запуске, без вопросов">
-        <input type="checkbox" id="updAuto">авто
-      </label>
-      <button class="upd-btn" id="updCheck">Проверить</button>
-    </div>
-  </div>
   <div class="empty" id="empty">Нет подключённых камер</div>
   <div class="toast" id="toast"></div>
+</div>
+
+<!-- Настройки: окно поверх панели с боковым списком разделов.
+     Сюда переехали блоки, которые нужны при настройке, а не в работе:
+     добавление камер по IP, доступ с других устройств и обновление. -->
+<div class="settings" id="settings">
+  <div class="set-card">
+    <div class="set-side">
+      <div class="set-title">Настройки</div>
+      <button class="set-nav on" data-pane="cams">Камеры</button>
+      <button class="set-nav"    data-pane="access">Доступ</button>
+      <button class="set-nav"    data-pane="update">Обновление</button>
+    </div>
+    <div class="set-main">
+      <button class="set-close" id="setClose" title="Закрыть">✕</button>
+
+      <section class="set-pane on" data-pane="cams">
+        <div class="set-h">Добавить камеру по IP</div>
+        <div class="ipbox" id="ipBox">
+          <div class="ip-hint">
+            Нужно, только если камера не появляется сама: сеть не пропускает автопоиск
+            (отдельный SSID 2.4 ГГц, гостевая сеть или изоляция клиентов на роутере).
+            Адрес камеры: Меню → Сеть → Wi-Fi → Отобр. инф. Wi-Fi.
+          </div>
+          <div class="ip-form">
+            <input type="text" id="ipInput" placeholder="192.168.1.55" inputmode="decimal" autocomplete="off">
+            <select id="ipModel"></select>
+            <label class="ip-ssh" title="Отметь, только если на камере включена аутентификация доступа">
+              <input type="checkbox" id="ipSsh">SSH
+            </label>
+            <button class="ip-add" id="ipAdd">Добавить</button>
+          </div>
+          <div class="ip-list" id="ipList"></div>
+        </div>
+      </section>
+
+      <section class="set-pane" data-pane="access">
+        <div class="set-h">Доступ к панели с других устройств</div>
+        <div class="set-note">Открой этот адрес на телефоне в той же сети или отсканируй код.</div>
+        <div class="share">
+          <div class="share-txt">
+            <div class="share-cap">Адрес панели</div>
+            <button class="share-url" id="shareUrl" title="Нажми — скопировать адрес">—</button>
+          </div>
+          <div class="share-qr" id="shareQr" title="Нажми — увеличить QR для сканирования"></div>
+        </div>
+      </section>
+
+      <section class="set-pane" data-pane="update">
+        <div class="set-h">Обновление</div>
+        <div class="set-note">Программа проверяет новые версии при запуске и раз в 4 часа.</div>
+        <div class="upd" id="updBox">
+          <div class="upd-new" id="updNew">
+            <span class="t" id="updMsg"></span>
+            <button class="upd-btn go" id="updGo">Обновить</button>
+          </div>
+          <div class="upd-line">
+            <span class="upd-ver" id="updVer">SignalBox</span>
+            <label class="upd-auto" title="Ставить обновления сразу при запуске, без вопросов">
+              <input type="checkbox" id="updAuto">авто
+            </label>
+            <button class="upd-btn" id="updCheck">Проверить</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
 </div>
 <div class="off-screen" id="offScreen">
   <div>
@@ -1194,8 +1275,41 @@ document.getElementById('shareUrl').onclick=copyShare;
 
   btn.onclick = add;
   input.addEventListener('keydown', e => { if(e.key === 'Enter') add(); });
-  box.addEventListener('toggle', () => { if(box.open) refresh(); });
+  window.refreshManualCams = refresh;   // окно настроек обновляет список при открытии
   refresh();
+})();
+
+/* ---------- окно настроек ----------
+   Разделы переехали сюда из основной панели: они нужны при настройке, а не в
+   работе, и занимали место над карточками камер. */
+(function(){
+  const wrap  = document.getElementById('settings');
+  const card  = wrap.querySelector('.set-card');
+  const navs  = [...wrap.querySelectorAll('.set-nav')];
+  const panes = [...wrap.querySelectorAll('.set-pane')];
+
+  function show(pane){
+    navs.forEach(n => n.classList.toggle('on', n.dataset.pane === pane));
+    panes.forEach(p => p.classList.toggle('on', p.dataset.pane === pane));
+  }
+  function open(pane){
+    if(pane) show(pane);
+    wrap.classList.add('show');
+    // список ручных камер мог измениться с прошлого открытия
+    if(window.refreshManualCams) window.refreshManualCams();
+  }
+  function close(){ wrap.classList.remove('show'); }
+
+  navs.forEach(n => n.onclick = ()=>show(n.dataset.pane));
+  document.getElementById('setBtn').onclick   = ()=>open();
+  document.getElementById('setClose').onclick = close;
+  wrap.onclick = e => { if(e.target === wrap) close(); };        // клик по фону
+  card.onclick = e => e.stopPropagation();
+  document.addEventListener('keydown', e => {
+    if(e.key === 'Escape' && wrap.classList.contains('show')) close();
+  });
+
+  window.openSettings = open;      // метка «доступна версия» открывает нужный раздел
 })();
 
 /* ---------- обновление программы ----------
@@ -1214,12 +1328,8 @@ document.getElementById('shareUrl').onclick=copyShare;
   let installing = false;
   let wasAvailable = null;      // чтобы сказать о новой версии один раз, а не каждые 20 с
 
-  // метка в шапке ведёт к блоку обновления и подсвечивает его
-  flag.onclick = ()=>{
-    box.scrollIntoView({behavior:'smooth', block:'center'});
-    box.classList.add('flash');
-    setTimeout(()=>box.classList.remove('flash'), 2000);
-  };
+  // метка в шапке открывает настройки сразу на разделе «Обновление»
+  flag.onclick = ()=>{ if(window.openSettings) window.openSettings('update'); };
 
   async function refresh(){
     try{
