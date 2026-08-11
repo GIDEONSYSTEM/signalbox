@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Шаблон Info.plist для .app-бандла под macOS. Версию и год подставляет CMake,
+  чтобы они не разошлись с kAppVersion в main.cpp.
+
+  🔴 CFBundleIdentifier МЕНЯТЬ НЕЛЬЗЯ. macOS привязывает к нему выданные
+  разрешения — в первую очередь «Локальная сеть», без которой не находятся
+  камеры. Сменишь идентификатор — у всех студий разрешение слетит, и починить
+  это можно будет только руками в системных настройках.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>ru</string>
+    <key>CFBundleExecutable</key>
+    <string>SignalBox</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.gideonsystem.signalbox</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>SignalBox</string>
+    <key>CFBundleDisplayName</key>
+    <string>SignalBox</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@SIGNALBOX_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@SIGNALBOX_VERSION@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
+
+    <!-- Программа живёт значком в строке меню, окна у неё нет: без LSUIElement
+         macOS показывала бы пустую иконку в Dock и переключалась на неё.
+         Это ровно то же, что NSApplicationActivationPolicyAccessory в коде. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- Текст в системном запросе доступа к локальной сети. Без разрешения
+         автопоиск камер (SSDP-мультикаст) молча не находит ничего. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SignalBox ищет камеры Sony в вашей Wi-Fi и отдаёт панель управления на телефон и в OBS.</string>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>SignalBox</string>
+</dict>
+</plist>

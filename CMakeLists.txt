@@ -7,6 +7,11 @@ endif()
 
 project(SignalBox LANGUAGES CXX)
 
+# Чем подписывать .app-бандл. "-" — подпись ad-hoc: бандл собран правильно и
+# работает на своей машине, но для раздачи нужен Developer ID (см. §14).
+set(SIGNALBOX_CODESIGN_IDENTITY "-" CACHE STRING
+    "Сертификат для codesign (\"-\" = ad-hoc; для релиза Developer ID Application: ...)")
+
 # Платформенный слой под macOS написан на Objective-C++ (AppKit, CoreMIDI).
 if(APPLE)
     enable_language(OBJCXX)
@@ -34,11 +39,23 @@ else()
     message(FATAL_ERROR "Нет реализации платформенного слоя для этой ОС (см. src/platform/Platform.h)")
 endif()
 
+# Версию держим в одном месте — kAppVersion в main.cpp. Info.plist берёт её
+# отсюда же, иначе «About» бандла и проверка обновлений разойдутся молча.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp" _main_src)
+string(REGEX MATCH "kAppVersion *= *\"([0-9._]+)\"" _m "${_main_src}")
+set(SIGNALBOX_VERSION "${CMAKE_MATCH_1}")
+if(NOT SIGNALBOX_VERSION)
+    message(FATAL_ERROR "Не нашёл kAppVersion в src/main.cpp")
+endif()
+unset(_main_src)
+message(STATUS "SignalBox версия ${SIGNALBOX_VERSION}")
+
 add_executable(SignalBox
     src/main.cpp
     src/CameraSession.cpp
     src/CameraSession.h
     src/HttpServer.h
+    src/UpdateAsset.h
     src/platform/Platform.h
     ${PLATFORM_SOURCES}
 )
@@ -56,12 +73,30 @@ if(WIN32)
 endif()
 
 if(APPLE)
+    # Info.plist собирается из шаблона: туда подставляется версия и планка ОС.
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/res/Info.plist.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
+
     set_target_properties(SignalBox PROPERTIES
         OBJCXX_STANDARD 17
         OBJCXX_STANDARD_REQUIRED YES
-        # Библиотеки Sony лежат рядом с бинарником, как и на Windows.
-        BUILD_RPATH   "@executable_path"
-        INSTALL_RPATH "@executable_path"
+        # 🔴 Настоящий .app-бандл, а не голый бинарник. Зачем:
+        #   * разрешение «Локальная сеть» macOS выдаёт приложению, а у голого
+        #     бинарника его получает ТЕРМИНАЛ — на чужой машине это вечное
+        #     «камеры не находятся»;
+        #   * двойной клик по бинарнику открывал Терминал, по бандлу — запускает;
+        #   * подписать и нотаризовать можно только бандл;
+        #   * SDK Sony ищет адаптеры в <bundlePath>/Contents/Frameworks/CrAdapter
+        #     ([[NSBundle mainBundle] bundlePath] — проверено в libCr_Core),
+        #     то есть внутри бандла это ровно штатная раскладка.
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist"
+        # Библиотеки Sony уезжают в Contents/Frameworks — туда и смотрим.
+        INSTALL_RPATH "@executable_path/../Frameworks"
+        # Без этого CMake дописывает в RPATH абсолютный путь к папке SDK на
+        # машине сборки. На чужом Mac его нет — в лучшем случае мусор в бинарнике,
+        # в худшем библиотека подхватится не та. Собираем сразу с итоговым RPATH.
+        BUILD_WITH_INSTALL_RPATH TRUE
     )
     # 🔴 ARC обязателен: без него объект, пойманный из completion-блока
     # NSURLSession в __block-переменную, успевает освободиться до того, как мы
@@ -134,23 +169,41 @@ if(WIN32)
 endif()
 
 if(APPLE)
-    # 🔴 Адаптеры SDK на macOS ищутся НЕ рядом с бинарником, а в
-    # Contents/Frameworks/CrAdapter — так это делает сэмпл Sony. Кладём библиотеки
-    # рядом, а папку адаптеров переносим туда, иначе камеры не находятся вообще.
+    # Раскладка бандла:
+    #   Contents/MacOS/SignalBox            — сам бинарник ($<TARGET_FILE_DIR:>)
+    #   Contents/Frameworks/*.dylib         — библиотеки Sony (туда смотрит RPATH)
+    #   Contents/Frameworks/CrAdapter/      — 🔴 адаптеры SDK; ищутся именно здесь,
+    #                                         иначе камеры не находятся вообще
+    #   Contents/Resources/www/             — панель
+    #   Contents/Resources/icon.icns        — значок (res/icon.ico -> tools/make-icns.sh)
+    set(BUNDLE_CONTENTS "$<TARGET_BUNDLE_CONTENT_DIR:SignalBox>")
+
     add_custom_command(TARGET SignalBox POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${CRSDK_LIBDIR}" "$<TARGET_FILE_DIR:SignalBox>"
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<TARGET_FILE_DIR:SignalBox>/Contents/Frameworks"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "$<TARGET_FILE_DIR:SignalBox>/CrAdapter"
-                "$<TARGET_FILE_DIR:SignalBox>/Contents/Frameworks/CrAdapter"
-        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:SignalBox>/CrAdapter"
+                "${CRSDK_LIBDIR}" "${BUNDLE_CONTENTS}/Frameworks"
+        # copy_directory затащил и CrAdapter — он уже на своём месте внутри
+        # Frameworks, отдельного переноса (как было у голого бинарника) не нужно.
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${BUNDLE_CONTENTS}/Resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/res/icon.icns"
+                "${BUNDLE_CONTENTS}/Resources/icon.icns"
         # Панель исторически лежит в build/Release/www (так она попала под git) —
         # на Windows каталог сборки совпадает, на macOS нет, поэтому копируем явно.
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${CMAKE_CURRENT_SOURCE_DIR}/build/Release/www"
-                "$<TARGET_FILE_DIR:SignalBox>/www"
+                "${BUNDLE_CONTENTS}/Resources/www"
+        # 🔴 Подписывать ПОСЛЕ того, как всё содержимое на месте. Линковщик
+        # подписывает только сам бинарник, и без этого шага бандл собран
+        # неправильно: `codesign --verify` говорит «code has no resources but
+        # signature indicates they must be present». Для нотаризации это блокер.
+        # --deep заодно перекрывает своей подписью dylib Sony (у них своя ad-hoc).
+        #
+        # По умолчанию подпись ad-hoc ("-"): её хватает, чтобы бандл был
+        # правильным и запускался на этой машине, но НЕ хватает для раздачи.
+        # Для релиза передать сертификат:
+        #   cmake -S . -B build-mac -DSIGNALBOX_CODESIGN_IDENTITY="Developer ID Application: ..."
+        COMMAND codesign --force --deep --sign "${SIGNALBOX_CODESIGN_IDENTITY}"
+                "$<TARGET_BUNDLE_DIR:SignalBox>"
         VERBATIM
     )
 endif()

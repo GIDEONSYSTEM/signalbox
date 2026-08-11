@@ -60,6 +60,26 @@ std::string exeDir();                     // папка, где лежит exe
 std::string tempDir();                    // системная папка временных файлов
 std::string joinPath(const std::string& a, const std::string& b);
 
+// Три папки, которые на Windows совпадают с exeDir(), а на macOS расходятся —
+// потому что там программа живёт внутри .app-бандла:
+//
+//   dataDir()     — КУДА ПИСАТЬ: cameras.txt, groups.json, settings.json, лог.
+//                   🔴 На macOS писать внутрь бандла нельзя: любая запись ломает
+//                   подпись приложения (а без валидной подписи нотаризация не
+//                   имеет смысла), и обновление, заменяющее бандл целиком,
+//                   унесло бы данные студии. Поэтому ~/Library/Application Support.
+//                   Папка создаётся при первом обращении.
+//   resourceDir() — ОТКУДА ЧИТАТЬ неизменяемое, сейчас это только www/.
+//   installRoot() — ЧТО ЗАМЕНЯЕТ ОБНОВЛЕНИЕ: на Windows папка с exe, на macOS
+//                   сам SignalBox.app. Отсюда же берётся имя папки внутри архива
+//                   релиза.
+//
+// На Windows все три возвращают exeDir() — поведение переносимой программы
+// «данные рядом с exe» не меняется (§5).
+std::string dataDir();
+std::string resourceDir();
+std::string installRoot();
+
 bool fileExists(const std::string& path);
 bool makeDir(const std::string& path);    // один уровень; уже есть — тоже true
 bool removeTree(const std::string& path); // рекурсивно, молча

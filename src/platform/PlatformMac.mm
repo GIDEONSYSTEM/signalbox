@@ -205,6 +205,51 @@ std::string exeDir() {
     return (slash == std::string::npos) ? std::string(".") : p.substr(0, slash);
 }
 
+// Три папки, которые внутри .app-бандла расходятся. Все три написаны так, чтобы
+// работать и без бандла — на случай запуска голого Contents/MacOS/SignalBox
+// (и чтобы отладочная сборка не требовала бандла вокруг себя).
+
+// bundlePath у голого бинарника — просто папка с ним, у бандла — сам .app.
+// Отличаем по расширению, а не по факту «непусто».
+std::string installRoot() {
+    @autoreleasepool {
+        NSString* p = [[NSBundle mainBundle] bundlePath];
+        const std::string s = p ? [p UTF8String] : std::string();
+        if (s.size() > 4 && s.compare(s.size() - 4, 4, ".app") == 0) return s;
+        return exeDir();
+    }
+}
+
+std::string resourceDir() {
+    @autoreleasepool {
+        NSString* p = [[NSBundle mainBundle] resourcePath];
+        if (p) {
+            const std::string s = [p UTF8String];
+            // У голого бинарника resourcePath укажет на несуществующую
+            // <папка>/Contents/Resources — тогда ресурсы лежат просто рядом.
+            if (fileExists(s)) return s;
+        }
+        return exeDir();
+    }
+}
+
+// ~/Library/Application Support/SignalBox — единственное место, куда программе
+// в бандле можно писать. Считаем один раз: путь за время работы не меняется, а
+// дёргается он часто (знакомые камеры переписываются раз в секунду).
+std::string dataDir() {
+    static const std::string cached = [] {
+        @autoreleasepool {
+            NSArray<NSString*>* dirs = NSSearchPathForDirectoriesInDomains(
+                NSApplicationSupportDirectory, NSUserDomainMask, YES);
+            if (dirs.count == 0) return exeDir();          // некуда — пусть будет рядом
+            const std::string dir = joinPath([dirs[0] UTF8String], "SignalBox");
+            if (!makeDir(dir)) return exeDir();            // не создалась — тоже рядом
+            return dir;
+        }
+    }();
+    return cached;
+}
+
 std::string tempDir() {
     @autoreleasepool {
         std::string s = [NSTemporaryDirectory() UTF8String];

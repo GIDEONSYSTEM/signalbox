@@ -110,8 +110,8 @@ static void requestRestart() {
 
 // Fresh log next to the exe on every start (previous run kept as .log.prev).
 static void openLogFile() {
-    const std::string cur  = plat::joinPath(plat::exeDir(), "SignalBox.log");
-    const std::string prev = plat::joinPath(plat::exeDir(), "SignalBox.log.prev");
+    const std::string cur  = plat::joinPath(plat::dataDir(), "SignalBox.log");
+    const std::string prev = plat::joinPath(plat::dataDir(), "SignalBox.log.prev");
     plat::replaceFile(cur, prev);
     // Файл должен остаться читаемым, пока мы в него пишем — без консоли это
     // единственный способ увидеть, что происходит (см. openForSharedWrite).
@@ -173,7 +173,7 @@ static void startShutdownWatchdog(int seconds) {
 // здесь остаётся политика: спросить один раз, запомнить отказ, написать в лог.
 
 // Marker next to the exe: the user said "no", don't nag on every start.
-static std::string fwSkipPath() { return plat::joinPath(plat::exeDir(), "firewall-skip.txt"); }
+static std::string fwSkipPath() { return plat::joinPath(plat::dataDir(), "firewall-skip.txt"); }
 
 // Normal startup path: ask once, then hand the actual change to Windows' own
 // elevation prompt. Never changes anything without both confirmations.
@@ -245,7 +245,7 @@ static UpdateInfo        g_upd;
 static std::atomic<bool> g_updBusy{false};      // идёт проверка или установка
 static std::atomic<bool> g_autoUpdate{false};
 
-static std::string settingsPath() { return plat::joinPath(plat::exeDir(), "settings.json"); }
+static std::string settingsPath() { return plat::joinPath(plat::dataDir(), "settings.json"); }
 
 static void loadSettings() {
     std::string s;
@@ -346,14 +346,23 @@ static std::string updateStagingDir() {
     return plat::joinPath(plat::tempDir(), "SignalBox-update");
 }
 
-// Имя файла программы: на Windows «SignalBox.exe», на macOS «SignalBox».
-// Берём его из собственного пути, а не пишем константой: иначе установщик
-// обновления ищет в архиве .exe и на macOS не находит ничего никогда.
-// Разделитель проверяем оба — путь строит слой, и он у каждой ОС свой.
-static std::string exeFileName() {
-    const std::string p = plat::exePath();
-    const size_t slash = p.find_last_of("\\/");
-    return (slash == std::string::npos) ? p : p.substr(slash + 1);
+// Имя того, что лежит внутри архива релиза и что обновление заменяет целиком:
+// на Windows папка «SignalBox», на macOS бандл «SignalBox.app».
+// Именно константа, а не имя папки установки: студия вправе переименовать папку
+// у себя, а имя внутри архива от этого не меняется.
+static std::string payloadName() {
+    return (std::string(plat::platformTag()) == "mac") ? "SignalBox.app" : "SignalBox";
+}
+
+// Путь к исполняемому файлу ВНУТРИ установленной копии, относительно её корня:
+// на Windows «SignalBox.exe», на macOS «Contents/MacOS/SignalBox». Считается от
+// собственных путей, чтобы раскладка бандла не жила в коде второй константой.
+static std::string exeRelToInstall() {
+    const std::string root = plat::installRoot();
+    const std::string exe  = plat::exePath();
+    if (exe.size() > root.size() + 1 && exe.compare(0, root.size(), root) == 0)
+        return exe.substr(root.size() + 1);
+    return exe;   // не сошлось — вернём полный путь, пусть ошибка будет заметной
 }
 
 // Скачать архив, распаковать и запустить распакованную копию в режиме --apply-update:
@@ -367,7 +376,7 @@ static bool startUpdateInstall(std::string& err) {
 
     const std::string stage = updateStagingDir();
     const std::string zip   = plat::joinPath(stage, "update.zip");
-    const std::string src   = plat::joinPath(stage, "SignalBox");   // внутри архива папка SignalBox\
+    const std::string src   = plat::joinPath(stage, payloadName()); // папка/бандл внутри архива
 
     bool ok = false;
     do {
@@ -380,16 +389,18 @@ static bool startUpdateInstall(std::string& err) {
             err = "не удалось скачать архив"; break;
         }
 
-        // В архиве ищем программу под тем же именем, под каким работаем сами:
+        // В архиве ищем программу в той же раскладке, в какой работаем сами:
         // архив, собранный для другой ОС, сюда не подойдёт — и это правильно.
-        const std::string exeName = exeFileName();
-        if (!plat::extractArchive(zip, stage) || !plat::fileExists(plat::joinPath(src, exeName))) {
-            err = "в архиве нет " + exeName + " — похоже, релиз собран для другой ОС"; break;
+        const std::string exeRel = exeRelToInstall();
+        if (!plat::extractArchive(zip, stage) || !plat::fileExists(plat::joinPath(src, exeRel))) {
+            err = "в архиве нет " + payloadName() + " — похоже, релиз собран для другой ОС"; break;
         }
 
-        const std::string args = "--apply-update \"" + plat::exeDir() + "\" " +
+        // Заменяем установленную копию ЦЕЛИКОМ: на macOS это весь .app-бандл,
+        // а не папка с бинарником (она внутри бандла).
+        const std::string args = "--apply-update \"" + plat::installRoot() + "\" " +
                                  std::to_string(plat::currentPid());
-        if (!plat::launch(plat::joinPath(src, exeName), args, src)) {
+        if (!plat::launch(plat::joinPath(src, exeRel), args, src)) {
             err = "не удалось запустить установщик"; break;
         }
         consolePrintf("[update] Ставлю версию %s, выключаюсь...\n", info.latest.c_str());
@@ -417,9 +428,10 @@ static int applyUpdate(const std::string& cmdLine) {
 
     // Копируем поверх, не удаляя лишнее в приёмнике: данные установки
     // (cameras.txt, groups.json, settings.json) в архив не входят и должны пережить обновление.
-    if (!plat::copyTree(plat::joinPath(updateStagingDir(), "SignalBox"), target)) return 1;
+    // На macOS данные и так лежат вне бандла (см. plat::dataDir), но правило то же.
+    if (!plat::copyTree(plat::joinPath(updateStagingDir(), payloadName()), target)) return 1;
 
-    plat::launch(plat::joinPath(target, exeFileName()), "", target);
+    plat::launch(plat::joinPath(target, exeRelToInstall()), "", target);
     return 0;
 }
 
@@ -722,7 +734,7 @@ static void macForIp(CrInt32u ipLe, CrInt8u out[6]) {
     std::memcpy(out + 2, &ipLe, 4);
 }
 
-static std::string manualCamsPath() { return plat::joinPath(plat::exeDir(), "cameras.txt"); }
+static std::string manualCamsPath() { return plat::joinPath(plat::dataDir(), "cameras.txt"); }
 
 static void ensureManualCamsFile() {
     const std::string p = manualCamsPath();
@@ -948,7 +960,7 @@ static void addManualCamsOnce(bool announce) {
 struct KnownCam { std::string mac, ip, model; };
 
 static std::mutex g_knownMutex;
-static std::string knownCamsPath() { return plat::joinPath(plat::exeDir(), "cameras-known.txt"); }
+static std::string knownCamsPath() { return plat::joinPath(plat::dataDir(), "cameras-known.txt"); }
 
 // "aa-bb-cc-dd-ee-ff", "AABBCCDDEEFF", "aa:bb:..." -> "AABBCCDDEEFF"
 static std::string normMac(const std::string& raw) {
@@ -1106,7 +1118,7 @@ static void reconnectKnownOnce(bool announce) {
 // because "CAM N" is assigned in discovery order and shuffles between runs.
 static std::mutex g_groupsMutex;
 
-static std::string groupsPath() { return plat::joinPath(plat::exeDir(), "groups.json"); }
+static std::string groupsPath() { return plat::joinPath(plat::dataDir(), "groups.json"); }
 
 static std::string readGroupsJson() {
     std::lock_guard<std::mutex> lk(g_groupsMutex);
@@ -1585,8 +1597,7 @@ int main() {
     plat::setLogger([](const std::string& s) { writeConsoleUtf8(s); });
 
     // Work from the exe directory so the SDK finds Cr_Core.dll + CrAdapter/.
-    const std::string dir = plat::exeDir();
-    plat::setWorkingDir(dir);
+    plat::setWorkingDir(plat::exeDir());
 
     const std::string cmdLine = plat::commandLine();
 
@@ -1637,7 +1648,9 @@ int main() {
                 std::this_thread::sleep_for(1s);
         }
     }).detach();
-    const std::string wwwDir = plat::joinPath(dir, "www");
+    // Панель — ресурс, а не данные: на macOS она лежит внутри бандла
+    // (Contents/Resources/www), на Windows — рядом с exe.
+    const std::string wwwDir = plat::joinPath(plat::resourceDir(), "www");
 
     consolePrintf("SignalBox — сборщик статуса камер Sony\n");
 

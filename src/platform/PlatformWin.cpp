@@ -112,6 +112,12 @@ std::string exeDir() {
     return (slash == std::string::npos) ? std::string(".") : p.substr(0, slash);
 }
 
+// Windows-раскладка переносимая: данные, ресурсы и цель обновления — всё рядом
+// с exe. Разъезжаются эти три понятия только на macOS, внутри .app-бандла.
+std::string dataDir()     { return exeDir(); }
+std::string resourceDir() { return exeDir(); }
+std::string installRoot() { return exeDir(); }
+
 std::string tempDir() {
     wchar_t tmp[MAX_PATH] = {0};
     GetTempPathW(MAX_PATH, tmp);
