@@ -48,9 +48,16 @@ winhttp` — **эти библиотеки нужны только платфо�
 
 | Копия | Путь | Роль |
 |---|---|---|
-| Рабочая | `…\CamCollector\build\Release\` | источник правды, правим здесь |
-| Распакованная | `X:\Desktop\SignalBox-portable\SignalBox\` | **юзер обычно запускает ЕЁ** |
-| Архив | `X:\Desktop\SignalBox-portable.zip` | из staging `%TEMP%\SignalBox-pack\` |
+| Рабочая | `…\CamCollector\build\Release\` (Win) · `…\CamCollector\build-mac\SignalBox.app` (Mac) | источник правды, правим здесь |
+| Распакованная | `X:\Desktop\SignalBox-portable\SignalBox\` | **владелец обычно запускает ЕЁ** |
+| Архив релиза | `…\CamCollector\dist\SignalBox-<версия>-win.zip` (и `-mac.zip`) | собирается скриптом, см. §7 |
+
+Архив **больше не собирается руками**: `tools\pack-win.ps1` и `tools/pack-mac.sh` берут версию из
+`main.cpp`, кладут результат в `dist\` и проверяют его распаковкой. Ручной staging в
+`%TEMP%\SignalBox-pack\` и файл `X:\Desktop\SignalBox-portable.zip` — прошлый уклад, удалены
+2026-08-11. `dist\` под `.gitignore`: место готовых архивов — в GitHub Releases, а не в репозитории.
+Распакованную копию обновлять как это делает само обновление — `robocopy /E` **без** `/PURGE`,
+иначе снесёт данные студии.
 
 На этом спотыкались **трижды**: правки «не появлялись», хотя всё собрано верно.
 Диагностика — кто держит порт:
