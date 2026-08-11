@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.15)
+
+# Планка macOS взята из сэмпла Sony — SDK собран под неё.
+if(APPLE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.1" CACHE STRING "Minimum macOS deployment version")
+endif()
+
 project(SignalBox LANGUAGES CXX)
+
+# Платформенный слой под macOS написан на Objective-C++ (AppKit, CoreMIDI).
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 # Reuse the Sony Camera Remote SDK shipped with the RemoteCli sample (sibling dir).
 set(REMOTECLI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../RemoteCli")
@@ -36,8 +47,23 @@ set_target_properties(SignalBox PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO
-    WIN32_EXECUTABLE TRUE          # /SUBSYSTEM:WINDOWS -> no console window at all
 )
+
+if(WIN32)
+    set_target_properties(SignalBox PROPERTIES
+        WIN32_EXECUTABLE TRUE      # /SUBSYSTEM:WINDOWS -> no console window at all
+    )
+endif()
+
+if(APPLE)
+    set_target_properties(SignalBox PROPERTIES
+        OBJCXX_STANDARD 17
+        OBJCXX_STANDARD_REQUIRED YES
+        # Библиотеки Sony лежат рядом с бинарником, как и на Windows.
+        BUILD_RPATH   "@executable_path"
+        INSTALL_RPATH "@executable_path"
+    )
+endif()
 
 if(MSVC)
     # Keep plain main() as the entry point despite the WINDOWS subsystem
@@ -47,8 +73,13 @@ endif()
 
 target_include_directories(SignalBox PRIVATE ${CRSDK_INC})
 
-# SDK DLLs are built UNICODE -> CrChar must be wchar_t in our TU too.
-target_compile_definitions(SignalBox PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+# 🔴 UNICODE определяем ТОЛЬКО под Windows — ровно как сэмпл Sony (RemoteCli).
+# От этого зависит тип CrChar в CrTypes.h: с UNICODE это wchar_t, без него — char.
+# DLL под Windows собраны с UNICODE, а dylib под macOS — без, и определить его
+# «за компанию» на Mac значит разойтись с библиотекой по ABI.
+if(WIN32)
+    target_compile_definitions(SignalBox PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 if(MSVC)
     # /utf-8 so the Russian console strings compile correctly.
@@ -67,19 +98,54 @@ if(WIN32)
     target_link_libraries(SignalBox PRIVATE ws2_32 winmm shell32 iphlpapi ole32 oleaut32 winhttp)
 endif()
 
-# Ship the MSVC runtime next to the exe (app-local deployment) so SignalBox starts on a
-# clean PC with no Visual C++ Redistributable installed. Needed not just by our exe:
-# the Sony SDK DLLs (Cr_Core, Cr_PTP_IP, Cr_PTP_USB, ...) import MSVCP140/VCRUNTIME140 too.
-set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)   # copy manually, don't add an install() rule
-include(InstallRequiredSystemLibraries)
+if(APPLE)
+    # Аналогично: фреймворки нужны только src/platform/PlatformMac.mm.
+    #   AppKit    — значок в строке меню, NSAlert, открыть ссылку в браузере
+    #   Foundation— NSURLSession (HTTP-клиент), пути, имя компьютера
+    #   CoreMIDI  — вход с пульта
+    find_library(APPKIT_FW     AppKit     REQUIRED)
+    find_library(FOUNDATION_FW Foundation REQUIRED)
+    find_library(COREMIDI_FW   CoreMIDI   REQUIRED)
+    target_link_libraries(SignalBox PRIVATE ${APPKIT_FW} ${FOUNDATION_FW} ${COREMIDI_FW})
+endif()
 
-# After build: drop SDK runtime DLLs + CrAdapter/ next to the exe, ensure www/ exists.
-add_custom_command(TARGET SignalBox POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CRSDK_LIBDIR}" "$<TARGET_FILE_DIR:SignalBox>"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_FILE_DIR:SignalBox>/www"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} "$<TARGET_FILE_DIR:SignalBox>"
-    VERBATIM
-)
+if(WIN32)
+    # Ship the MSVC runtime next to the exe (app-local deployment) so SignalBox starts on a
+    # clean PC with no Visual C++ Redistributable installed. Needed not just by our exe:
+    # the Sony SDK DLLs (Cr_Core, Cr_PTP_IP, Cr_PTP_USB, ...) import MSVCP140/VCRUNTIME140 too.
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)   # copy manually, don't add an install() rule
+    include(InstallRequiredSystemLibraries)
+
+    # After build: drop SDK runtime DLLs + CrAdapter/ next to the exe, ensure www/ exists.
+    add_custom_command(TARGET SignalBox POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CRSDK_LIBDIR}" "$<TARGET_FILE_DIR:SignalBox>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:SignalBox>/www"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} "$<TARGET_FILE_DIR:SignalBox>"
+        VERBATIM
+    )
+endif()
+
+if(APPLE)
+    # 🔴 Адаптеры SDK на macOS ищутся НЕ рядом с бинарником, а в
+    # Contents/Frameworks/CrAdapter — так это делает сэмпл Sony. Кладём библиотеки
+    # рядом, а папку адаптеров переносим туда, иначе камеры не находятся вообще.
+    add_custom_command(TARGET SignalBox POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CRSDK_LIBDIR}" "$<TARGET_FILE_DIR:SignalBox>"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:SignalBox>/Contents/Frameworks"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "$<TARGET_FILE_DIR:SignalBox>/CrAdapter"
+                "$<TARGET_FILE_DIR:SignalBox>/Contents/Frameworks/CrAdapter"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:SignalBox>/CrAdapter"
+        # Панель исторически лежит в build/Release/www (так она попала под git) —
+        # на Windows каталог сборки совпадает, на macOS нет, поэтому копируем явно.
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/build/Release/www"
+                "$<TARGET_FILE_DIR:SignalBox>/www"
+        VERBATIM
+    )
+endif()

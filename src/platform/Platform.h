@@ -39,8 +39,12 @@ void onInterrupt(std::function<void()> handler);
 void setLogger(std::function<void(const std::string&)> sink);
 
 // ---------------- строки ----------------
-// SDK Sony возвращает wchar_t*; больше wchar_t в приложении не встречается.
-std::string utf8FromWide(const wchar_t* w);
+// SDK Sony отдаёт строки типом CrChar, а он зависит от платформы: под Windows
+// (сборка с UNICODE) это wchar_t, под macOS — обычный char в UTF-8. Перегрузки
+// дают вызывающему коду писать plat::utf8From(info->GetModel()) и не думать,
+// какой сегодня CrChar. Больше wchar_t в приложении не встречается нигде.
+std::string utf8From(const wchar_t* w);
+inline std::string utf8From(const char* s) { return s ? std::string(s) : std::string(); }
 
 // ---------------- пути и файлы ----------------
 // Пути — UTF-8. Разделитель подставляет joinPath, руками '\\' не писать.

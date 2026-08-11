@@ -1109,11 +1109,11 @@ static void discoverOnce(bool announce) {
     CrInt32u n = list->GetCount();
     for (CrInt32u i = 0; i < n; ++i) {
         const SDK::ICrCameraObjectInfo* info = list->GetCameraObjectInfo(i);
-        std::string mac = plat::utf8FromWide(info->GetMACAddressChar());
-        std::string ip  = plat::utf8FromWide(info->GetIPAddressChar());
+        std::string mac = plat::utf8From(info->GetMACAddressChar());
+        std::string ip  = plat::utf8From(info->GetIPAddressChar());
         std::string keyNew = mac.empty() ? ip : mac;
         // Запомнить: если в другой раз автопоиск её не увидит, подключимся по адресу.
-        rememberCamera(mac, ip, plat::utf8FromWide(info->GetModel()));
+        rememberCamera(mac, ip, plat::utf8From(info->GetModel()));
 
         std::string fm, where;
         bool addedNew = false;

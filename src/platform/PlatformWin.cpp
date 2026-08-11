@@ -29,7 +29,7 @@
 namespace plat {
 namespace {
 
-// ---- конверсия строк (наружу торчит только utf8FromWide) ----
+// ---- конверсия строк (наружу торчит только utf8From) ----
 std::wstring wide(const std::string& utf8) {
     if (utf8.empty()) return {};
     const int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()),
@@ -88,7 +88,7 @@ void setLogger(std::function<void(const std::string&)> sink) {
 }
 
 // ---------------- строки ----------------
-std::string utf8FromWide(const wchar_t* w) {
+std::string utf8From(const wchar_t* w) {
     if (!w) return {};
     const int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     if (len <= 1) return {};
@@ -101,7 +101,7 @@ std::string utf8FromWide(const wchar_t* w) {
 std::string exePath() {
     wchar_t p[MAX_PATH] = {0};
     GetModuleFileNameW(nullptr, p, MAX_PATH);
-    return utf8FromWide(p);
+    return utf8From(p);
 }
 
 std::string exeDir() {
@@ -113,7 +113,7 @@ std::string exeDir() {
 std::string tempDir() {
     wchar_t tmp[MAX_PATH] = {0};
     GetTempPathW(MAX_PATH, tmp);
-    std::string s = utf8FromWide(tmp);
+    std::string s = utf8From(tmp);
     while (!s.empty() && (s.back() == '\\' || s.back() == '/')) s.pop_back();   // joinPath добавит свой
     return s;
 }
@@ -217,7 +217,7 @@ void writeConsole(const std::string& s) {
 }
 
 // ---------------- процессы ----------------
-std::string commandLine() { return utf8FromWide(GetCommandLineW()); }
+std::string commandLine() { return utf8From(GetCommandLineW()); }
 
 unsigned long currentPid() { return GetCurrentProcessId(); }
 
@@ -334,7 +334,7 @@ std::vector<NetInterface> listIPv4Interfaces() {
             char ip[64] = {0};
             if (!::inet_ntop(AF_INET, &s->sin_addr, ip, sizeof(ip))) continue;
             NetInterface n;
-            n.name       = utf8FromWide(a->FriendlyName);
+            n.name       = utf8From(a->FriendlyName);
             n.ip         = ip;
             n.virtualIf  = virt;
             n.hasGateway = gw;
@@ -472,7 +472,7 @@ bool askYesNo(const std::string& title, const std::string& text) {
 
 std::string computerName() {
     wchar_t buf[256]; DWORD n = 256;
-    if (GetComputerNameW(buf, &n)) return utf8FromWide(buf);
+    if (GetComputerNameW(buf, &n)) return utf8From(buf);
     return {};
 }
 
@@ -609,7 +609,7 @@ bool midiStart(std::function<void(unsigned, unsigned, unsigned)> onMessage) {
     for (UINT i = 0; i < n; ++i) {
         MIDIINCAPSW caps{};
         if (midiInGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
-            logf("   [%u] %s\n", i, utf8FromWide(caps.szPname).c_str());
+            logf("   [%u] %s\n", i, utf8From(caps.szPname).c_str());
         HMIDIIN h = nullptr;
         if (midiInOpen(&h, i, reinterpret_cast<DWORD_PTR>(midiCallback), 0,
                        CALLBACK_FUNCTION) == MMSYSERR_NOERROR) {

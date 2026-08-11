@@ -17,8 +17,6 @@ using namespace std::chrono_literals;
 
 namespace {
 
-// SDK Sony отдаёт строки в wchar_t — это единственное место, где он тут нужен.
-std::string wideToUtf8(const wchar_t* w) { return plat::utf8FromWide(w); }
 
 constexpr std::uint32_t kIsoValueMask = 0x00FFFFFF;
 constexpr std::uint32_t kIsoAutoValue = 0x00FFFFFF;   // value-part meaning AUTO
@@ -118,15 +116,15 @@ std::string CameraSession::idLabel() const {
 }
 
 std::string CameraSession::modelUtf8() const {
-    return m_info ? wideToUtf8(m_info->GetModel()) : std::string();
+    return m_info ? plat::utf8From(m_info->GetModel()) : std::string();
 }
 
 std::string CameraSession::ipUtf8() const {
-    return m_info ? wideToUtf8(m_info->GetIPAddressChar()) : std::string();
+    return m_info ? plat::utf8From(m_info->GetIPAddressChar()) : std::string();
 }
 
 std::string CameraSession::macUtf8() const {
-    return m_info ? wideToUtf8(m_info->GetMACAddressChar()) : std::string();
+    return m_info ? plat::utf8From(m_info->GetMACAddressChar()) : std::string();
 }
 
 bool CameraSession::startConnect() {
