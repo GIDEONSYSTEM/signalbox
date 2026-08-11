@@ -6,6 +6,10 @@
 /build/Release/*
 !/build/Release/www/
 
+# Сборка под macOS целиком генерируемая: бинарник, dylib Sony (одна на 18 МБ) и
+# копия www, которую CMake кладёт туда из build/Release/www при каждой сборке.
+/build-mac/
+
 # --- данные конкретной установки, а не код ---
 # (они и так внутри build/Release, но перечислим явно — на случай переноса)
 cameras.txt

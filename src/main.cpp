@@ -344,6 +344,16 @@ static std::string updateStagingDir() {
     return plat::joinPath(plat::tempDir(), "SignalBox-update");
 }
 
+// Имя файла программы: на Windows «SignalBox.exe», на macOS «SignalBox».
+// Берём его из собственного пути, а не пишем константой: иначе установщик
+// обновления ищет в архиве .exe и на macOS не находит ничего никогда.
+// Разделитель проверяем оба — путь строит слой, и он у каждой ОС свой.
+static std::string exeFileName() {
+    const std::string p = plat::exePath();
+    const size_t slash = p.find_last_of("\\/");
+    return (slash == std::string::npos) ? p : p.substr(slash + 1);
+}
+
 // Скачать архив, распаковать и запустить распакованную копию в режиме --apply-update:
 // она дождётся нашего выхода, заменит файлы и стартует уже обновлённую программу.
 // Так не приходится перезаписывать файлы, которые сейчас заняты (exe и DLL Sony).
@@ -368,13 +378,16 @@ static bool startUpdateInstall(std::string& err) {
             err = "не удалось скачать архив"; break;
         }
 
-        if (!plat::extractArchive(zip, stage) || !plat::fileExists(plat::joinPath(src, "SignalBox.exe"))) {
-            err = "архив распаковался неправильно"; break;
+        // В архиве ищем программу под тем же именем, под каким работаем сами:
+        // архив, собранный для другой ОС, сюда не подойдёт — и это правильно.
+        const std::string exeName = exeFileName();
+        if (!plat::extractArchive(zip, stage) || !plat::fileExists(plat::joinPath(src, exeName))) {
+            err = "в архиве нет " + exeName + " — похоже, релиз собран для другой ОС"; break;
         }
 
         const std::string args = "--apply-update \"" + plat::exeDir() + "\" " +
                                  std::to_string(plat::currentPid());
-        if (!plat::launch(plat::joinPath(src, "SignalBox.exe"), args, src)) {
+        if (!plat::launch(plat::joinPath(src, exeName), args, src)) {
             err = "не удалось запустить установщик"; break;
         }
         consolePrintf("[update] Ставлю версию %s, выключаюсь...\n", info.latest.c_str());
@@ -404,7 +417,7 @@ static int applyUpdate(const std::string& cmdLine) {
     // (cameras.txt, groups.json, settings.json) в архив не входят и должны пережить обновление.
     if (!plat::copyTree(plat::joinPath(updateStagingDir(), "SignalBox"), target)) return 1;
 
-    plat::launch(plat::joinPath(target, "SignalBox.exe"), "", target);
+    plat::launch(plat::joinPath(target, exeFileName()), "", target);
     return 0;
 }
 
@@ -1727,7 +1740,15 @@ int main() {
     if (!lan.empty()) {
         consolePrintf("\nС телефона/планшета в той же Wi-Fi:\n");
         consolePrintf("  http://%s:%u/\n", lan.c_str(), kPort);
-        consolePrintf("  (если не открывается — разреши SignalBox в брандмауэре Windows)\n");
+        // Подсказка зависит от ОС, но #ifdef в прикладном коде мы не держим:
+        // firewallSupported() как раз и отличает систему с заранее выдаваемым
+        // правилом на приложение (Windows) от той, где его нет (macOS).
+        if (plat::firewallSupported())
+            consolePrintf("  (если не открывается — разреши SignalBox в брандмауэре Windows)\n");
+        else
+            consolePrintf("  (если не открывается — разреши SignalBox входящие подключения и\n"
+                          "   доступ к локальной сети: Системные настройки -> Конфиденциальность\n"
+                          "   и безопасность -> Локальная сеть)\n");
     }
     consolePrintf("\nИщу камеры в сети, подключаюсь автоматически (подтверждай связывание на камерах).\n");
     consolePrintf("Перезапуск и выключение — кнопками на самой панели.\n\n");
