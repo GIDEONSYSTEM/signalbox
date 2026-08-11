@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Сценарий окна установщика macOS. Подставляет версию tools/pack-mac-pkg.sh.
+
+  Порядок экранов задаёт сам Installer.app по тому, какие ресурсы найдены:
+  license.txt даёт экран «Лицензия» с кнопками «Принимаю»/«Не принимаю»,
+  conclusion.txt — последний экран «Установка завершена».
+  Ресурсы лежат в res/ и передаются productbuild ключом resources.
+
+  ⚠️ В комментариях XML нельзя писать два дефиса подряд: productbuild падает
+  разбором. На этом уже споткнулись, когда тут стояло название ключа с дефисами.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>SignalBox @VERSION@</title>
+
+    <!-- Лицензия. Без согласия установка не продолжается. -->
+    <license file="license.txt" mime-type="text/plain"/>
+    <conclusion file="conclusion.txt" mime-type="text/plain"/>
+
+    <!-- customize="never": выбирать нечего, компонент один. Незачем показывать
+         пользователю дерево компонентов ради единственной галочки. -->
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+
+    <!-- Планка ОС та же, что в Info.plist бандла (CMAKE_OSX_DEPLOYMENT_TARGET).
+         Без этой проверки установщик пустил бы на старую систему, а программа
+         там просто не запустилась бы — с невнятной ошибкой. -->
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="@MIN_OS@"/>
+        </allowed-os-versions>
+    </volume-check>
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.gideonsystem.signalbox"/>
+        </line>
+    </choices-outline>
+
+    <choice id="default"/>
+    <choice id="com.gideonsystem.signalbox" visible="false">
+        <pkg-ref id="com.gideonsystem.signalbox"/>
+    </choice>
+
+    <pkg-ref id="com.gideonsystem.signalbox" version="@VERSION@" onConclusion="none">SignalBox-component.pkg</pkg-ref>
+</installer-gui-script>
