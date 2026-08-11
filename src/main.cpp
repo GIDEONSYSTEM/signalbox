@@ -217,6 +217,15 @@ static void maybeOfferFirewallRules() {
 static bool        jsonGet(const std::string&, const std::string&, std::string&);   // определены ниже
 static std::string jsonEscape(const std::string&);
 
+// Регистронезависимое сравнение ASCII: _stricmp есть только у MSVC, strcasecmp —
+// только в POSIX. Свои пять строк дешевле, чем #ifdef в прикладном коде.
+static bool iequalsAscii(const char* a, const char* b) {
+    for (; *a && *b; ++a, ++b)
+        if (std::tolower(static_cast<unsigned char>(*a)) !=
+            std::tolower(static_cast<unsigned char>(*b))) return false;
+    return *a == *b;
+}
+
 static const char*    kAppVersion = "1.0.5";
 // ЗАПОЛНИТЬ после создания репозитория, формат "владелец/репозиторий".
 // Пустая строка = проверка обновлений выключена.
@@ -301,7 +310,7 @@ static void checkUpdateOnce(bool announce) {
             const size_t q2 = (q1 == std::string::npos) ? q1 : json.find('"', q1 + 1);
             if (q2 == std::string::npos) break;
             const std::string u = json.substr(q1 + 1, q2 - q1 - 1);
-            if (u.size() > 4 && _stricmp(u.c_str() + u.size() - 4, ".zip") == 0) { url = u; break; }
+            if (u.size() > 4 && iequalsAscii(u.c_str() + u.size() - 4, ".zip")) { url = u; break; }
         }
         bool tagLooksLikeVersion = false;
         for (unsigned char c : tag) if (std::isdigit(c)) { tagLooksLikeVersion = true; break; }
@@ -535,7 +544,7 @@ static bool jsonGet(const std::string& body, const std::string& key, std::string
 
 static std::string contentTypeFor(const std::string& path) {
     auto ends = [&](const char* s){ size_t n = std::strlen(s);
-        return path.size() >= n && _stricmp(path.c_str() + path.size() - n, s) == 0; };
+        return path.size() >= n && iequalsAscii(path.c_str() + path.size() - n, s); };
     if (ends(".html") || ends(".htm")) return "text/html; charset=utf-8";
     if (ends(".js"))   return "application/javascript; charset=utf-8";
     if (ends(".css"))  return "text/css; charset=utf-8";
@@ -1407,11 +1416,14 @@ static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std:
         // /liveview/<n>.jpg -> latest cached JPEG + frames header. Marks the
         // camera "active" so the worker keeps pulling frames (on-demand).
         int idx = std::atoi(req.path.c_str() + std::string("/liveview/").size());
-        // ?seq=N — какой кадр уже есть у клиента
+        // ?seq=N — какой кадр уже есть у клиента.
+        // ⚠️ Искать ИМЕННО в query: сервер отрезает строку запроса от пути, и
+        // поиск "seq=" в req.path не находил ничего никогда — все кадры уходили
+        // клиенту целиком, даже когда камера не выдала ничего нового.
         long long haveSeq = -1;
         {
-            const size_t q = req.path.find("seq=");
-            if (q != std::string::npos) haveSeq = _atoi64(req.path.c_str() + q + 4);
+            const size_t q = req.query.find("seq=");
+            if (q != std::string::npos) haveSeq = std::strtoll(req.query.c_str() + q + 4, nullptr, 10);
         }
         std::string jpeg, frames;
         long long seq = 0;
