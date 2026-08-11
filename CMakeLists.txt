@@ -48,6 +48,13 @@ if(NOT SIGNALBOX_VERSION)
     message(FATAL_ERROR "Не нашёл kAppVersion в src/main.cpp")
 endif()
 unset(_main_src)
+# 🔴 Без этой строки CMake не знает, что зависит от main.cpp: правка kAppVersion
+# запускает только пересборку, а конфигурация остаётся старой — и Info.plist
+# бандла хранит прежнюю версию, из-за чего pack-mac.sh падает с «пересобери»,
+# хотя пересборка как раз не помогает (нужна реконфигурация). Проверено:
+# без CONFIGURE_DEPENDS смена 1.0.5 -> 1.0.6 не перезапустила configure.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 message(STATUS "SignalBox версия ${SIGNALBOX_VERSION}")
 
 add_executable(SignalBox
