@@ -79,6 +79,8 @@ void shutdown() {
     WSACleanup();
 }
 
+const char* platformTag() { return "win"; }
+
 void onInterrupt(std::function<void()> handler) {
     g_interrupt = std::move(handler);
 }

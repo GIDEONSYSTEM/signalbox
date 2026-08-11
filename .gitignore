@@ -10,6 +10,9 @@
 # копия www, которую CMake кладёт туда из build/Release/www при каждой сборке.
 /build-mac/
 
+# Готовые архивы релиза (tools/pack-mac.sh) — их место в GitHub Releases.
+/dist/
+
 # --- данные конкретной установки, а не код ---
 # (они и так внутри build/Release, но перечислим явно — на случай переноса)
 cameras.txt
@@ -26,3 +29,4 @@ firewall-skip.txt
 *.zip
 Thumbs.db
 desktop.ini
+.DS_Store

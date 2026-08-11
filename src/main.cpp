@@ -15,6 +15,7 @@
 
 #include "HttpServer.h"
 #include "CameraSession.h"
+#include "UpdateAsset.h"       // выбор архива релиза под свою ОС (прогоняется тестом)
 #include "platform/Platform.h" // всё, что зависит от ОС, — только через этот слой
 
 #include <atomic>
@@ -302,21 +303,19 @@ static void checkUpdateOnce(bool announce) {
     } else {
         std::string tag;
         jsonGet(json, "tag_name", tag);
-        // среди активов выбираем первый .zip
-        std::string url;
-        const std::string key = "\"browser_download_url\"";
-        for (size_t p = json.find(key); p != std::string::npos; p = json.find(key, p + 1)) {
-            const size_t q1 = json.find('"', json.find(':', p) + 1);
-            const size_t q2 = (q1 == std::string::npos) ? q1 : json.find('"', q1 + 1);
-            if (q2 == std::string::npos) break;
-            const std::string u = json.substr(q1 + 1, q2 - q1 - 1);
-            if (u.size() > 4 && iequalsAscii(u.c_str() + u.size() - 4, ".zip")) { url = u; break; }
-        }
+        // Выбор архива под свою ОС — правила и грабли в UpdateAsset.h.
+        const upd::AssetChoice pick = upd::pickReleaseAsset(json, plat::platformTag());
+        const std::string url = pick.url;
+
         bool tagLooksLikeVersion = false;
         for (unsigned char c : tag) if (std::isdigit(c)) { tagLooksLikeVersion = true; break; }
 
-        if (tag.empty() || url.empty()) {
+        if (tag.empty() || !pick.anyZip) {
             info.error = "в релизе нет архива .zip";
+        } else if (url.empty()) {
+            // Архивы есть, но все чужие: сказать прямо, иначе выглядит как «нет релиза».
+            info.error = std::string("в релизе нет сборки для этой ОС — нужен архив с \"-") +
+                         plat::platformTag() + "\" в имени";
         } else if (!tagLooksLikeVersion) {
             // Иначе тег молча посчитался бы нулевой версией и обновления бы «не находились».
             info.error = "тег релиза \"" + tag + "\" не похож на версию — нужно, например, v1.0.1";
@@ -334,7 +333,10 @@ static void checkUpdateOnce(bool announce) {
         if (!info.error.empty())
             consolePrintf("[update] Проверка не удалась: %s\n", info.error.c_str());
         else if (info.available)
-            consolePrintf("[update] Доступна версия %s (сейчас %s).\n", info.latest.c_str(), kAppVersion);
+            // Имя архива в логе: по нему сразу видно, что релиз собран правильно
+            // и что скачивается сборка для своей ОС, а не соседней.
+            consolePrintf("[update] Доступна версия %s (сейчас %s), архив %s.\n",
+                          info.latest.c_str(), kAppVersion, upd::urlFileName(info.url).c_str());
         else
             consolePrintf("[update] Установлена последняя версия (%s).\n", kAppVersion);
     }

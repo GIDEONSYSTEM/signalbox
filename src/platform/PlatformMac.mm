@@ -169,6 +169,8 @@ bool init() {
 
 void shutdown() {}
 
+const char* platformTag() { return "mac"; }
+
 void onInterrupt(std::function<void()> handler) { g_interrupt = std::move(handler); }
 
 void setLogger(std::function<void(const std::string&)> sink) { g_log = std::move(sink); }
