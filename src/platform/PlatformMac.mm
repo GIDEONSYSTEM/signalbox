@@ -609,7 +609,20 @@ void runEventLoop(const TrayActions& actions, const std::function<bool()>& keepR
         if (!g_statusItem) {
             logf("[tray] Не удалось создать значок в строке меню.\n");
         } else {
-            g_statusItem.button.title = @"◉";        // до появления своей иконки
+            // Тот же логотип Wi-Fi, что в res/icon.ico на Windows, но системным
+            // символом: в строке меню полагается монохромная template-картинка —
+            // она сама подстраивается под светлую и тёмную тему и под высоту
+            // строки, а цветная иконка там выглядит чужеродно и мылится.
+            // ⚠️ setTemplate: сообщением, а не через точку: свойство называется
+            // template, а это ключевое слово C++, и файл собирается как ObjC++.
+            NSImage* icon = [NSImage imageWithSystemSymbolName:@"wifi"
+                                     accessibilityDescription:@"SignalBox"];
+            if (icon) {
+                [icon setTemplate:YES];
+                g_statusItem.button.image = icon;
+            } else {
+                g_statusItem.button.title = @"◉";    // без символа — хоть что-то видимое
+            }
             g_statusItem.button.toolTip = @"SignalBox";
 
             NSMenu* menu = [[NSMenu alloc] init];
@@ -623,7 +636,10 @@ void runEventLoop(const TrayActions& actions, const std::function<bool()>& keepR
             g_statusItem.menu = menu;
 
             g_trayAdded.store(true);
-            logf("[tray] Значок добавлен в строку меню.\n");
+            // Какой именно знак получился — видно только глазами, поэтому пишем
+            // в лог: иначе «значок не тот» нечем отличить от «символ не нашёлся».
+            logf("[tray] Значок добавлен в строку меню (%s).\n",
+                 icon ? "символ wifi" : "запасной знак ◉");
         }
 
         // Тот же принцип, что на Windows: не засыпаем навсегда, раз в ~150 мс
