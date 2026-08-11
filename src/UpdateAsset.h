@@ -16,6 +16,7 @@
 // обновиться студии на Windows скачают mac-сборку.
 
 #include <cctype>
+#include <cstddef>   // size_t: у clang приезжает попутно, у MSVC — не обязан
 #include <string>
 
 namespace upd {
