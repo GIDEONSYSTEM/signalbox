@@ -63,6 +63,11 @@ if(APPLE)
         BUILD_RPATH   "@executable_path"
         INSTALL_RPATH "@executable_path"
     )
+    # 🔴 ARC обязателен: без него объект, пойманный из completion-блока
+    # NSURLSession в __block-переменную, успевает освободиться до того, как мы
+    # его прочитаем (блок отрабатывает в чужом потоке со своим autorelease-пулом).
+    set_source_files_properties(src/platform/PlatformMac.mm
+                                PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
 if(MSVC)

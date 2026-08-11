@@ -161,7 +161,7 @@ bool init() {
     ::signal(SIGPIPE, SIG_IGN);
     struct sigaction sa {};
     sa.sa_handler = signalHandler;
-    ::sigemptyset(&sa.sa_mask);
+    sigemptyset(&sa.sa_mask);              // без ::, это макрос, а не функция
     ::sigaction(SIGINT,  &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
     return true;
