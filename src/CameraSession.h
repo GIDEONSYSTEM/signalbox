@@ -4,6 +4,8 @@
 // Implements IDeviceCallback so the SDK can report connect/disconnect/errors.
 
 #include <atomic>
+#include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -14,6 +16,11 @@
 #include "ICrCameraObjectInfo.h"
 
 namespace coll {
+
+// Куда писать диагностику камер. Без этого она уходила в консоль, которой у
+// программы нет (сборка без окна) — и всё, что происходило с подключением,
+// ошибками SDK и подгонкой значений, пропадало бесследно.
+void setLogSink(std::function<void(const std::string&)> sink);
 
 // A selectable camera property: current encoded value + the list the camera
 // allows ({encoded value, display label}).
@@ -106,6 +113,27 @@ private:
     CamStatus readStatusLocked();            // assumes m_io held
     int       readRecordingStateLocked();    // -1 unknown, 0 not rec, 1 rec
     bool      setEncoded(CrInt32u code, const std::string& value, SCRSDK::CrDataType type);
+    bool      setEncodedLocked(CrInt32u code, long long v, SCRSDK::CrDataType type);
+
+    // 🔴 Камера применяет НЕ ТО значение, которое просили, когда SDK объявляет
+    // список шире, чем камера поддерживает в текущем режиме. У ZV-E1 при 25/50p
+    // в списке остаются «киношные» 1/48 и 1/96, которых на самом деле нет, и
+    // промах равен числу таких значений между текущим и запрошенным (проверено
+    // на живой камере: 1/40 -> просим 1/50 -> получаем 1/60).
+    // Поэтому после установки сверяем результат при следующем опросе и досылаем
+    // команду. Сходится за одну-две попытки: чем ближе, тем меньше «пустых»
+    // значений между. Число попыток ограничено — если камера значение просто не
+    // принимает, мы не должны спорить с ней вечно и мешать человеку крутить
+    // колесо на тушке.
+    struct PendingSet {
+        long long          want  = 0;    // ожидаемое значение в том же виде, в каком его читает readStatus
+        long long          write = 0;    // что именно отправлять (у ISO это код с битами режима)
+        SCRSDK::CrDataType type{};
+        int                tries = 0;
+    };
+    void      rememberTargetLocked(CrInt32u code, long long want, long long write,
+                                   SCRSDK::CrDataType type);
+    void      reconcileLocked(const CamStatus& s);   // assumes m_io held
 
     int                        m_index;
     SCRSDK::ICrCameraObjectInfo* m_info   = nullptr;   // deep copy, owned
@@ -120,6 +148,7 @@ private:
     std::vector<CrInt8u>       m_lvBuf;                 // reusable live-view image buffer (m_io)
     bool                       m_osdEnabled = false;    // OSDImageMode turned on once (m_io)
     std::atomic<bool>          m_recCached{false};      // last polled rec state (lock-free read)
+    std::map<CrInt32u, PendingSet> m_pending;           // код свойства -> чего ждём (m_io)
     std::mutex                 m_io;                    // serializes SDK calls on this handle
 };
 

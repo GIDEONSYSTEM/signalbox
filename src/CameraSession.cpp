@@ -22,13 +22,30 @@ constexpr std::uint32_t kIsoValueMask = 0x00FFFFFF;
 constexpr std::uint32_t kIsoAutoValue = 0x00FFFFFF;   // value-part meaning AUTO
 constexpr std::uint16_t kBatteryUntaken = 0xFFFF;
 constexpr int           kMaxReadFail   = 3;           // failed polls in a row -> treat as offline
+// Сколько раз досылать команду, если камера применила не то значение. Каждая
+// попытка приходится на очередной опрос, то есть примерно раз в секунду:
+// три — это до ~3 с настойчивости, дальше отступаем.
+constexpr int           kSetRetries    = 3;
 
 // ---- display labels for selectable properties ----
+// ⚠️ ГРАБЛЯ (§3 документации): "%.1f" на RU-локали печатает ЗАПЯТУЮ — выдержка
+// показывалась как 0,8" вместо 0.8", а диафрагма как F2,8. В JSON это внутри
+// строки, поэтому не ломалось, но подпись зависела от локали машины. Дробь
+// считаем целыми числами: десятые доли с округлением, точка литеральная.
+std::string tenthsLabel(unsigned whole, unsigned tenth) {
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "%u.%u", whole, tenth);
+    return buf;
+}
+
 std::string apertureLabel(std::uint16_t f) {           // FNumber = F * 100
     if (f == 0 || f == 0xFFFE || f == 0xFFFF || f == 0xFFFD) return "";
     char buf[16];
-    if (f % 100) std::snprintf(buf, sizeof(buf), "F%.1f", f / 100.0);
-    else         std::snprintf(buf, sizeof(buf), "F%d", f / 100);
+    if (f % 100) {
+        const unsigned t = (static_cast<unsigned>(f) + 5) / 10;   // сотые -> десятые
+        return "F" + tenthsLabel(t / 10, t % 10);
+    }
+    std::snprintf(buf, sizeof(buf), "F%d", f / 100);
     return buf;
 }
 std::string shutterLabel(std::uint32_t s) {            // hi = numerator, lo = denominator
@@ -38,10 +55,10 @@ std::string shutterLabel(std::uint32_t s) {            // hi = numerator, lo = d
     std::uint16_t den = static_cast<std::uint16_t>(s & 0xFFFF);
     if (den == 0) return "";
     char buf[24];
-    if (num == 1)                std::snprintf(buf, sizeof(buf), "1/%u", den);
-    else if (num % den == 0)     std::snprintf(buf, sizeof(buf), "%u\"", num / den);
-    else                         std::snprintf(buf, sizeof(buf), "%.1f\"", static_cast<double>(num) / den);
-    return buf;
+    if (num == 1)            { std::snprintf(buf, sizeof(buf), "1/%u", den); return buf; }
+    if (num % den == 0)      { std::snprintf(buf, sizeof(buf), "%u\"", num / den); return buf; }
+    const unsigned t = (static_cast<unsigned>(num) * 10 + den / 2) / den;
+    return tenthsLabel(t / 10, t % 10) + "\"";
 }
 std::string wbLabel(std::uint16_t w) {                 // CrWhiteBalanceSetting
     switch (w) {
@@ -71,8 +88,10 @@ long long nowMs() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-// Диагностика в консоль (плат. слой печатает настоящим Unicode, независимо от
-// кодовой страницы, которую сбрасывает SDK).
+std::function<void(const std::string&)> g_logSink;
+
+// Диагностика камер. Идёт туда, куда указал main (в лог рядом с exe), а до
+// установки приёмника — в консоль, если она есть.
 void clog(const char* fmt, ...) {
     char buf[1024];
     va_list ap; va_start(ap, fmt);
@@ -80,10 +99,16 @@ void clog(const char* fmt, ...) {
     va_end(ap);
     if (n < 0) return;
     size_t len = (static_cast<size_t>(n) < sizeof(buf)) ? static_cast<size_t>(n) : sizeof(buf) - 1;
-    plat::writeConsole(std::string(buf, len));
+    const std::string s(buf, len);
+    if (g_logSink) g_logSink(s);
+    else           plat::writeConsole(s);
 }
 
 } // namespace
+
+namespace coll {
+void setLogSink(std::function<void(const std::string&)> sink) { g_logSink = std::move(sink); }
+} // namespace coll
 
 namespace coll {
 
@@ -389,6 +414,9 @@ CamStatus CameraSession::readStatusLocked() {
         m_readFailStreak = 0;
         m_lastGood = s;
         m_recCached.store(s.rec);
+        // Свежие значения на руках — самое время проверить, применила ли камера
+        // то, что мы просили в прошлый раз (см. комментарий к PendingSet).
+        if (!m_pending.empty()) reconcileLocked(s);
         return s;
     }
 
@@ -448,10 +476,25 @@ bool CameraSession::setIso(const std::string& value) {
         if (props) SDK::ReleaseDeviceProperties(m_handle, props);
     }
 
+    if (!setEncodedLocked(SDK::CrDevicePropertyCode::CrDeviceProperty_IsoSensitivity, enc,
+                          SDK::CrDataType::CrDataType_UInt32Array))
+        return false;
+    // Сверять будем по маске (в старших битах живёт режим), а досылать — точный
+    // код, который подобрали по списку камеры.
+    rememberTargetLocked(SDK::CrDevicePropertyCode::CrDeviceProperty_IsoSensitivity,
+                         static_cast<long long>(enc & kIsoValueMask), static_cast<long long>(enc),
+                         SDK::CrDataType::CrDataType_UInt32Array);
+    return true;
+}
+
+// Один вызов SDK, без блокировки: вызывается и снаружи (setEncoded), и из
+// сверки внутри readStatusLocked, где m_io уже взят.
+bool CameraSession::setEncodedLocked(CrInt32u code, long long v, SDK::CrDataType type) {
+    if (!m_handle || !m_connected.load()) return false;
     SDK::CrDeviceProperty prop;
-    prop.SetCode(SDK::CrDevicePropertyCode::CrDeviceProperty_IsoSensitivity);
-    prop.SetCurrentValue(static_cast<CrInt64u>(enc));
-    prop.SetValueType(SDK::CrDataType::CrDataType_UInt32Array);
+    prop.SetCode(code);
+    prop.SetCurrentValue(static_cast<CrInt64u>(v));
+    prop.SetValueType(type);
     return CR_SUCCEEDED(SDK::SetDeviceProperty(m_handle, &prop));
 }
 
@@ -459,15 +502,51 @@ bool CameraSession::setIso(const std::string& value) {
 // the camera's own option list in /status.json, so no matching needed).
 bool CameraSession::setEncoded(CrInt32u code, const std::string& value, SDK::CrDataType type) {
     std::lock_guard<std::mutex> lk(m_io);
-    if (!m_handle || !m_connected.load()) return false;
     char* end = nullptr;
     long long v = std::strtoll(value.c_str(), &end, 10);
     if (end == value.c_str()) return false;
-    SDK::CrDeviceProperty prop;
-    prop.SetCode(code);
-    prop.SetCurrentValue(static_cast<CrInt64u>(v));
-    prop.SetValueType(type);
-    return CR_SUCCEEDED(SDK::SetDeviceProperty(m_handle, &prop));
+    if (!setEncodedLocked(code, v, type)) return false;
+    rememberTargetLocked(code, v, v, type);
+    return true;
+}
+
+// Запомнить, чего мы ждём от камеры. Новая команда по тому же свойству
+// перекрывает старую: человек передумал, догонять прошлое значение незачем.
+void CameraSession::rememberTargetLocked(CrInt32u code, long long want, long long write,
+                                         SDK::CrDataType type) {
+    PendingSet p;
+    p.want  = want;
+    p.write = write;
+    p.type  = type;
+    p.tries = kSetRetries;
+    m_pending[code] = p;
+}
+
+// Вызывается из readStatusLocked со свежепрочитанным состоянием. Сверяет, что
+// камера применила именно запрошенное, и досылает команду, если нет.
+void CameraSession::reconcileLocked(const CamStatus& s) {
+    for (auto it = m_pending.begin(); it != m_pending.end(); ) {
+        long long cur;
+        switch (it->first) {
+        case SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterSpeed:   cur = s.shutter.cur;  break;
+        case SDK::CrDevicePropertyCode::CrDeviceProperty_FNumber:        cur = s.aperture.cur; break;
+        case SDK::CrDevicePropertyCode::CrDeviceProperty_IsoSensitivity: cur = s.isoOpts.cur;  break;
+        default: it = m_pending.erase(it); continue;      // за остальным не следим
+        }
+        if (cur == it->second.want) {                     // сошлось
+            it = m_pending.erase(it);
+            continue;
+        }
+        if (it->second.tries <= 0) {                      // камера значение просто не принимает
+            clog("[CAM %d %s] камера оставила %lld вместо запрошенного %lld — больше не настаиваю\n",
+                 m_index, modelUtf8().c_str(), cur, it->second.want);
+            it = m_pending.erase(it);
+            continue;
+        }
+        --it->second.tries;
+        setEncodedLocked(it->first, it->second.write, it->second.type);
+        ++it;
+    }
 }
 
 bool CameraSession::setAperture(const std::string& enc) {

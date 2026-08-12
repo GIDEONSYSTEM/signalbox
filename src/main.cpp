@@ -1603,6 +1603,10 @@ int main() {
     plat::init();
     plat::onInterrupt([] { g_running.store(false); });   // Ctrl+C / закрытие окна: просто выход
     plat::setLogger([](const std::string& s) { writeConsoleUtf8(s); });
+    // Диагностика камер тоже в общий лог: без этого всё, что CameraSession
+    // сообщает о подключении и о подгонке значений, уходило в несуществующую
+    // консоль (сборка без окна) и пропадало.
+    coll::setLogSink([](const std::string& s) { writeConsoleUtf8(s); });
 
     // Work from the exe directory so the SDK finds Cr_Core.dll + CrAdapter/.
     plat::setWorkingDir(plat::exeDir());
