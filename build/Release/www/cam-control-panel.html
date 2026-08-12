@@ -250,18 +250,22 @@
   .rec-btn.pending{opacity:.55; pointer-events:none;}
 
   /* ISO block */
-  /* ISO — одной строкой: подпись слева, степперы справа. Так блок вдвое ниже,
-     а кнопка REC подтягивается за ним (align-items:stretch в .controls). */
-  /* ISO — по ширине содержимого (влезает самое длинное значение), Mic Gain занимает остаток */
+  /* ISO и Mic Gain — колонкой: подпись сверху по центру, под ней «− значение +».
+     Так оба блока читаются одинаково и подпись не спорит за ширину со значением.
+     Кнопка REC подтягивается по высоте за ними (align-items:stretch в .controls). */
   .iso, .mic{background:var(--panel-2); border:1px solid var(--edge-2); border-radius:9px;
-       padding:3px 8px; display:flex; flex-direction:row; align-items:center; gap:8px;}
+       padding:3px 8px 4px; display:flex; flex-direction:column; align-items:stretch; gap:2px;}
   .iso{flex:0 0 auto;}
   .mic{flex:1 1 auto; min-width:0;}
-  .iso-top{flex:none; display:flex; flex-direction:column; align-items:flex-start;
-           justify-content:center; line-height:1.15;}
+  /* подпись и «эфф. ISO» — в одну строку по центру, иначе блок вырастает втрое */
+  .iso-top{flex:none; display:flex; flex-direction:row; align-items:baseline;
+           justify-content:center; gap:6px; line-height:1.15;}
   .iso-lab{font-family:var(--cond); font-weight:600; letter-spacing:.1em; font-size:10px; color:var(--ink-dim); text-transform:uppercase;}
   .iso-eff{font-family:var(--mono); font-weight:700; font-size:10px; color:var(--ink-dim);}
-  .iso-row{flex:1; display:flex; align-items:center; gap:5px; min-width:0;}
+  /* «эфф. ISO» показывается только в АВТО. Пустой span всё равно съедал бы свой
+     gap и сдвигал подпись ISO влево от центра — поэтому убираем его совсем. */
+  .iso-eff:empty{display:none;}
+  .iso-row{flex:none; display:flex; align-items:center; justify-content:center; gap:5px; min-width:0;}
   .step{flex:none; width:23px; height:23px; border-radius:6px; border:1px solid var(--edge);
         background:#1c222b; color:var(--ink); font-family:var(--mono); font-weight:800; font-size:14px;
         cursor:pointer; display:flex; align-items:center; justify-content:center; user-select:none;}
@@ -270,12 +274,15 @@
   .iso-sel,.ctl-sel{flex:1; appearance:none; -webkit-appearance:none; text-align:center;
            background:#1c222b; border:1px solid var(--edge); border-radius:7px; color:var(--ink);
            font-family:var(--mono); font-weight:800; font-size:15px; padding:4px 6px; cursor:pointer; width:100%;}
-  /* только ISO — второй ряд не трогаем. width:auto → селектор шириной под самое
-     длинное значение, а не на всю строку */
+  /* ISO и Mic Gain — второй ряд карточки не трогаем. width:auto → селектор
+     шириной под самое длинное значение, чтобы «− значение +» стояло по центру,
+     а не растягивалось на всю строку */
   .iso-sel{font-size:13px; padding:2px 6px; flex:0 0 auto; width:auto;}
-  .mic-sel{font-size:13px; padding:2px 6px;}
+  .mic-sel{font-size:13px; padding:2px 6px; flex:0 0 auto; width:auto;}
   .iso-sel:focus,.ctl-sel:focus{outline:none; border-color:rgba(255,255,255,.3);}
   .ctl-sel:disabled{opacity:.4; cursor:default;}
+  /* нечего перебирать (камера отдала одно значение или ни одного) — гасим стрелки */
+  .step.off{opacity:.35; pointer-events:none;}
 
   /* второй ряд контролов: диафрагма · выдержка · ББ(K) */
   .controls2{display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:9px;}
@@ -751,7 +758,11 @@ function buildCard(cam){
       </div>
       <div class="mic">
         <div class="iso-top"><span class="iso-lab">Mic Gain</span></div>
-        <div class="iso-row"><select class="ctl-sel mic-sel"></select></div>
+        <div class="iso-row">
+          <div class="step mic-minus">−</div>
+          <select class="ctl-sel mic-sel"></select>
+          <div class="step mic-plus">+</div>
+        </div>
       </div>
     </div>
     <div class="controls2">
@@ -796,6 +807,8 @@ function buildCard(cam){
     isoEffEl: card.querySelector('.iso-eff'),
     minus:    card.querySelector('.step.minus'),
     plus:     card.querySelector('.step.plus'),
+    micMinus: card.querySelector('.step.mic-minus'),
+    micPlus:  card.querySelector('.step.mic-plus'),
     apSel:    card.querySelector('.ap-sel'),
     shSel:    card.querySelector('.sh-sel'),
     wbSel:    card.querySelector('.wb-sel'),
@@ -817,6 +830,8 @@ function buildCard(cam){
   e.shSel.onchange  = ()=>cmd({cam:e.camNum,action:"shutter", value:e.shSel.value});
   e.wbSel.onchange  = ()=>cmd({cam:e.camNum,action:"wbkelvin",value:e.wbSel.value});
   e.micSel.onchange = ()=>cmd({cam:e.camNum,action:"micgain", value:e.micSel.value});
+  e.micMinus.onclick= ()=>stepSelect(e, e.micSel, "micgain", -1);
+  e.micPlus.onclick = ()=>stepSelect(e, e.micSel, "micgain", +1);
   card.querySelector('.lv-head').onclick = ()=>{
     const lv = card.querySelector('.lv');
     if(lv.classList.toggle('open')) lvStart(e); else lvStop(e);
@@ -855,6 +870,20 @@ function stepIso(e,dir){
   if(idx<0) idx = vals.indexOf("AUTO");
   const ni = Math.max(0, Math.min(vals.length-1, idx+dir));
   cmd({cam:e.camNum,action:"iso",value:String(vals[ni])});
+}
+
+/* ---------- шаг по списку, который прислала камера ----------
+   Для ISO есть своя таблица значений (камера их не всегда отдаёт), а здесь
+   перебираем ровно то, что лежит в самом селекторе: список приходит от камеры
+   и у разных моделей разный. Так «+/−» не разъедутся с тем, что видит человек. */
+function stepSelect(e, sel, action, dir){
+  const opts = Array.from(sel.options).filter(o=>o.value !== '');
+  if(opts.length < 2) return;
+  let idx = opts.findIndex(o=>o.value === sel.value);
+  if(idx < 0) idx = 0;
+  const ni = Math.max(0, Math.min(opts.length-1, idx + dir));
+  if(ni === idx) return;                      // край списка — команду не шлём
+  cmd({cam:e.camNum, action, value:opts[ni].value});
 }
 
 /* ---------- заполнение динамических списков (диафрагма/выдержка) ---------- */
@@ -912,7 +941,13 @@ function updateCard(e, d){
   // уровень микрофона: показываем, только если камера его отдаёт
   const mg = d.micGain && Array.isArray(d.micGain.opts) ? d.micGain.opts : [];
   e.micBox.style.display = mg.length ? '' : 'none';
-  if(mg.length) fillSelect(e.micSel, mg, d.micGain.cur, null);
+  if(mg.length){
+    fillSelect(e.micSel, mg, d.micGain.cur, null);
+    // список из одного значения перебирать нечем — стрелки гасим, чтобы клик
+    // не выглядел сломанным
+    e.micMinus.classList.toggle('off', e.micSel.disabled);
+    e.micPlus .classList.toggle('off', e.micSel.disabled);
+  }
 
   // ББ в кельвинах — ближайший пресет
   if(d.wbKelvin!=null){ const k = String(nearestK(d.wbKelvin)); if(e.wbSel.value !== k) e.wbSel.value = k; }
