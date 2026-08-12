@@ -302,6 +302,21 @@ CamStatus CameraSession::readStatusLocked() {
                 std::uint32_t iv = static_cast<std::uint32_t>(val) & kIsoValueMask;
                 s.iso = (iv == kIsoAutoValue) ? std::string("AUTO")
                                               : std::to_string(iv);
+                // Тот же ответ несёт и полный список доступных ISU. Маску снимаем
+                // и здесь: в старших битах живёт режим (Normal/Extended), а панели
+                // и setIso нужно само число — точное значение setIso потом
+                // подберёт обратно по списку камеры.
+                s.isoOpts.cur = static_cast<long long>(iv);
+                const auto* arr = reinterpret_cast<const std::uint32_t*>(props[i].GetValues());
+                if (arr) {
+                    const CrInt32u cnt = props[i].GetValueSize() / sizeof(std::uint32_t);
+                    for (CrInt32u k = 0; k < cnt; ++k) {
+                        const std::uint32_t v = arr[k] & kIsoValueMask;
+                        if (v == 0) continue;
+                        s.isoOpts.opts.push_back({ v, (v == kIsoAutoValue) ? std::string("AUTO")
+                                                                          : std::to_string(v) });
+                    }
+                }
                 break;
             }
             case SDK::CrDevicePropertyCode::CrDeviceProperty_IsoCurrentSensitivity: {
@@ -338,6 +353,17 @@ CamStatus CameraSession::readStatusLocked() {
                 // 0x0000 = ниже min, 0xFFFF = выше max — оба отсекаются диапазоном.
                 std::uint32_t k = static_cast<std::uint32_t>(val);
                 if (k >= 1000 && k <= 50000) s.wbKelvin = static_cast<int>(k);
+                // Тип свойства — UInt16Range, поэтому значения приходят не списком,
+                // а границами [min, max, шаг] (как у AudioInputMasterLevel). Сам шаг
+                // у ZV-E1 равен 100 K; раньше панель об этом не знала и округляла
+                // к своим пресетам.
+                const auto* arr = reinterpret_cast<const std::uint16_t*>(props[i].GetValues());
+                const CrInt32u cnt = arr ? props[i].GetValueSize() / sizeof(std::uint16_t) : 0;
+                if (cnt >= 3 && arr[1] > arr[0]) {
+                    s.wbKelvinMin  = arr[0];
+                    s.wbKelvinMax  = arr[1];
+                    s.wbKelvinStep = arr[2] > 0 ? arr[2] : 100;
+                }
                 break;
             }
             case SDK::CrDevicePropertyCode::CrDeviceProperty_AudioInputMasterLevel: {

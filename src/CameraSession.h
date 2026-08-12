@@ -31,10 +31,19 @@ struct CamStatus {
     bool        writing     = false;
     std::string iso;                // "AUTO" or number string, empty = unknown
     int         isoEff      = -1;   // effective ISO number, -1 = unknown / AUTO
+    // Полный список ISO, который отдаёт САМА камера: у разных тушек и режимов он
+    // разный, и зашитая в панель таблица неизбежно с ним расходилась.
+    // cur/значения — уже с наложенной маской 0x00FFFFFF (AUTO = 0xFFFFFF).
+    CamPropOpts isoOpts;
     CamPropOpts aperture;           // FNumber (value = F*100)
     CamPropOpts shutter;            // ShutterSpeed (hi=num, lo=den)
     CamPropOpts wb;                 // WhiteBalance (mode enum)
     int         wbKelvin    = -1;   // текущая цвет. температура ББ, K (-1 = недоступно)
+    // Диапазон цвет. температуры, как его объявляет камера: min/max/шаг. У ZV-E1
+    // шаг 100 K — панель раньше округляла к своим пресетам и промахивалась.
+    int         wbKelvinMin  = -1;
+    int         wbKelvinMax  = -1;
+    int         wbKelvinStep = -1;
     CamPropOpts micGain;            // уровень записи микрофона (AudioInputMasterLevel, 0..31)
 };
 

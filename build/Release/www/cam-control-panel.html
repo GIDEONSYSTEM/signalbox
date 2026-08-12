@@ -284,11 +284,18 @@
   /* нечего перебирать (камера отдала одно значение или ни одного) — гасим стрелки */
   .step.off{opacity:.35; pointer-events:none;}
 
-  /* второй ряд контролов: диафрагма · выдержка · ББ(K) */
-  .controls2{display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-top:9px;}
-  .ctl{display:flex; flex-direction:column; gap:4px;}
+  /* второй ряд контролов: Aperture · Shutter · WB — как ISO и Mic Gain:
+     подпись сверху по центру, под ней «− значение +» */
+  .controls2{display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-top:9px;}
+  .ctl{display:flex; flex-direction:column; gap:3px; min-width:0;}
   .ctl-lab{font-family:var(--cond); font-weight:600; letter-spacing:.08em; font-size:9px;
-           color:var(--ink-dim); text-transform:uppercase; padding-left:2px;}
+           color:var(--ink-dim); text-transform:uppercase; text-align:center;}
+  .ctl-row{display:flex; align-items:center; justify-content:center; gap:3px; min-width:0;}
+  /* значение по содержимому, а не на всю колонку: иначе вокруг него оставалось
+     много пустого места, а стрелки уезжали к краям слота */
+  .ctl-row .ctl-sel{flex:0 1 auto; width:auto; min-width:0; font-size:13px; padding:5px 2px;}
+  /* стрелки во втором ряду мельче: три колонки узкие, а «1/8000» должно влезать */
+  .ctl-row .step{width:19px; height:24px; font-size:13px; border-radius:5px;}
   .ctl-sel{font-size:13px; padding:6px 4px;}
 
   /* Live Preview — выпадающий раздел с окном 16:9 */
@@ -766,9 +773,15 @@ function buildCard(cam){
       </div>
     </div>
     <div class="controls2">
-      <div class="ctl"><span class="ctl-lab">Диафрагма</span><select class="ctl-sel ap-sel"></select></div>
-      <div class="ctl"><span class="ctl-lab">Выдержка</span><select class="ctl-sel sh-sel"></select></div>
-      <div class="ctl"><span class="ctl-lab">ББ, K</span><select class="ctl-sel wb-sel">${KELVIN_OPTS}</select></div>
+      <div class="ctl"><span class="ctl-lab">Aperture</span>
+        <div class="ctl-row"><div class="step ap-minus">−</div><select class="ctl-sel ap-sel"></select><div class="step ap-plus">+</div></div>
+      </div>
+      <div class="ctl"><span class="ctl-lab">Shutter</span>
+        <div class="ctl-row"><div class="step sh-minus">−</div><select class="ctl-sel sh-sel"></select><div class="step sh-plus">+</div></div>
+      </div>
+      <div class="ctl"><span class="ctl-lab">WB</span>
+        <div class="ctl-row"><div class="step wb-minus">−</div><select class="ctl-sel wb-sel">${KELVIN_OPTS}</select><div class="step wb-plus">+</div></div>
+      </div>
     </div>
     <div class="lv">
       <div class="lv-head">
@@ -812,6 +825,14 @@ function buildCard(cam){
     apSel:    card.querySelector('.ap-sel'),
     shSel:    card.querySelector('.sh-sel'),
     wbSel:    card.querySelector('.wb-sel'),
+    apMinus:  card.querySelector('.step.ap-minus'),
+    apPlus:   card.querySelector('.step.ap-plus'),
+    shMinus:  card.querySelector('.step.sh-minus'),
+    shPlus:   card.querySelector('.step.sh-plus'),
+    wbMinus:  card.querySelector('.step.wb-minus'),
+    wbPlus:   card.querySelector('.step.wb-plus'),
+    pend:     {},          // что человек выбрал и что камера ещё не подтвердила
+    wbOpts:   null, wbSig: null,
     lvFrame:  card.querySelector('.lv-frame'),
     lvMedia:  card.querySelector('.lv-media'),
     lvImg:    card.querySelector('.lv-img'),
@@ -823,15 +844,23 @@ function buildCard(cam){
   };
   // обработчики
   e.recBtn.onclick  = ()=>{ e.recBtn.classList.add('pending'); cmd({cam:e.camNum,action:"rec",value:e.rec?"stop":"start"}); };
-  e.isoSel.onchange = ()=>cmd({cam:e.camNum,action:"iso",value:e.isoSel.value});
-  e.minus.onclick   = ()=>stepIso(e,-1);
-  e.plus.onclick    = ()=>stepIso(e,+1);
-  e.apSel.onchange  = ()=>cmd({cam:e.camNum,action:"aperture",value:e.apSel.value});
-  e.shSel.onchange  = ()=>cmd({cam:e.camNum,action:"shutter", value:e.shSel.value});
-  e.wbSel.onchange  = ()=>cmd({cam:e.camNum,action:"wbkelvin",value:e.wbSel.value});
-  e.micSel.onchange = ()=>cmd({cam:e.camNum,action:"micgain", value:e.micSel.value});
-  e.micMinus.onclick= ()=>stepSelect(e, e.micSel, "micgain", -1);
-  e.micPlus.onclick = ()=>stepSelect(e, e.micSel, "micgain", +1);
+  // Все органы управления идут через send(): он и команду шлёт, и запоминает
+  // выбор, чтобы опрос не вернул старое значение, пока камера подтверждает.
+  e.isoSel.onchange = ()=>send(e, 'iso',      'iso',      e.isoSel.value);
+  e.minus.onclick   = ()=>stepSelect(e, e.isoSel, 'iso',      'iso',      -1);
+  e.plus.onclick    = ()=>stepSelect(e, e.isoSel, 'iso',      'iso',      +1);
+  e.apSel.onchange  = ()=>send(e, 'aperture', 'aperture', e.apSel.value);
+  e.apMinus.onclick = ()=>stepSelect(e, e.apSel,  'aperture', 'aperture', -1);
+  e.apPlus.onclick  = ()=>stepSelect(e, e.apSel,  'aperture', 'aperture', +1);
+  e.shSel.onchange  = ()=>send(e, 'shutter',  'shutter',  e.shSel.value);
+  e.shMinus.onclick = ()=>stepSelect(e, e.shSel,  'shutter',  'shutter',  -1);
+  e.shPlus.onclick  = ()=>stepSelect(e, e.shSel,  'shutter',  'shutter',  +1);
+  e.wbSel.onchange  = ()=>send(e, 'wbkelvin', 'wbkelvin', e.wbSel.value);
+  e.wbMinus.onclick = ()=>stepSelect(e, e.wbSel,  'wbkelvin', 'wbkelvin', -1);
+  e.wbPlus.onclick  = ()=>stepSelect(e, e.wbSel,  'wbkelvin', 'wbkelvin', +1);
+  e.micSel.onchange = ()=>send(e, 'micgain',  'micgain',  e.micSel.value);
+  e.micMinus.onclick= ()=>stepSelect(e, e.micSel, 'micgain',  'micgain',  -1);
+  e.micPlus.onclick = ()=>stepSelect(e, e.micSel, 'micgain',  'micgain',  +1);
   card.querySelector('.lv-head').onclick = ()=>{
     const lv = card.querySelector('.lv');
     if(lv.classList.toggle('open')) lvStart(e); else lvStop(e);
@@ -863,27 +892,55 @@ function buildCard(cam){
   return e;
 }
 
-/* ---------- ISO шаги ---------- */
-function stepIso(e,dir){
-  const vals = CONFIG.isoValues;
-  let idx = vals.findIndex(v=>String(v)===String(e.iso));
-  if(idx<0) idx = vals.indexOf("AUTO");
-  const ni = Math.max(0, Math.min(vals.length-1, idx+dir));
-  cmd({cam:e.camNum,action:"iso",value:String(vals[ni])});
+/* ---------- удержание выбора, пока камера подтверждает ----------
+   🐞 Камера подтверждает новое значение не сразу: замерено на живой ZV-E1 —
+   после /cmd status.json отдаёт СТАРОЕ значение ещё 0.6–1.0 с. Опрос идёт раз в
+   секунду и в это окно возвращал селектор к старому значению: человек ставил
+   1/50, через полсекунды видел 1/40, потом 1/60. Камера при этом вела себя
+   правильно — прыгала именно панель.
+
+   Поэтому после команды запоминаем, что выбрал человек, и показываем это, пока
+   не случится одно из двух: камера подтвердит значение или истечёт таймаут.
+   Таймаут обязателен — иначе отвергнутое камерой значение висело бы вечно. */
+const PENDING_MS = 4000;
+
+function markPending(e, key, value){ e.pend[key] = { v:String(value), until: Date.now() + PENDING_MS }; }
+
+function desired(e, key, camCur){
+  const p = e.pend[key];
+  if(!p) return camCur;
+  if(String(camCur) === p.v || Date.now() > p.until){ delete e.pend[key]; return camCur; }
+  return p.v;
+}
+
+// Отправить команду и сразу показать выбранное, не дожидаясь опроса.
+function send(e, key, action, value){
+  markPending(e, key, value);
+  return cmd({cam:e.camNum, action, value:String(value)});
+}
+
+// Нечего перебирать (камера отдала одно значение или ни одного) — гасим стрелки,
+// чтобы клик не выглядел сломанным.
+function toggleSteps(minusEl, plusEl, sel){
+  if(!minusEl || !plusEl) return;
+  const off = !sel || sel.disabled || sel.options.length < 2;
+  minusEl.classList.toggle('off', off);
+  plusEl .classList.toggle('off', off);
 }
 
 /* ---------- шаг по списку, который прислала камера ----------
    Для ISO есть своя таблица значений (камера их не всегда отдаёт), а здесь
    перебираем ровно то, что лежит в самом селекторе: список приходит от камеры
    и у разных моделей разный. Так «+/−» не разъедутся с тем, что видит человек. */
-function stepSelect(e, sel, action, dir){
+function stepSelect(e, sel, key, action, dir){
   const opts = Array.from(sel.options).filter(o=>o.value !== '');
   if(opts.length < 2) return;
   let idx = opts.findIndex(o=>o.value === sel.value);
   if(idx < 0) idx = 0;
   const ni = Math.max(0, Math.min(opts.length-1, idx + dir));
   if(ni === idx) return;                      // край списка — команду не шлём
-  cmd({cam:e.camNum, action, value:opts[ni].value});
+  sel.value = opts[ni].value;                 // показываем сразу, не ожидая опроса
+  send(e, key, action, opts[ni].value);
 }
 
 /* ---------- заполнение динамических списков (диафрагма/выдержка) ---------- */
@@ -930,27 +987,56 @@ function updateCard(e, d){
   e.cardVal.querySelector('.u').textContent = mu;
   e.cardVal.className = 'val card-val' + (mk ? ' num-'+mk : '');
 
-  // ISO
-  if(d.iso!==undefined){ e.iso = d.iso; const s = String(d.iso); if(e.isoSel.value !== s) e.isoSel.value = s; }
+  // ISO. Список берём у камеры: он зависит от модели и режима съёмки, и зашитая
+  // таблица с ним расходилась (у ZV-E1 камера даёт шаг в треть ступени —
+  // 80·100·125·160·200…, а в таблице был совсем другой набор).
+  // CONFIG.isoValues остаётся запасным путём, если камера списка не прислала.
+  if(d.iso!==undefined) e.iso = d.iso;
+  const isoOpts = (d.isoOpts && Array.isArray(d.isoOpts.opts) ? d.isoOpts.opts : [])
+                    .map(o => [o[0], o[1] === 'AUTO' ? 'АВТО' : o[1]]);
+  if(isoOpts.length){
+    fillSelect(e.isoSel, isoOpts, desired(e, 'iso', d.isoOpts.cur), null);
+  }else if(d.iso!==undefined){
+    const s = String(desired(e, 'iso', d.iso));
+    if(e.isoSel.value !== s) e.isoSel.value = s;
+  }
   e.isoEffEl.textContent = d.iso==="AUTO" ? `эфф. ${d.isoEff ?? ''}` : '';
+  toggleSteps(e.minus, e.plus, e.isoSel);
 
   // диафрагма / выдержка
-  fillSelect(e.apSel, d.aperture && d.aperture.opts, d.aperture && d.aperture.cur, fmtAperture);
-  fillSelect(e.shSel, d.shutter && d.shutter.opts,  d.shutter && d.shutter.cur,  fmtShutter);
+  fillSelect(e.apSel, d.aperture && d.aperture.opts,
+             desired(e, 'aperture', d.aperture && d.aperture.cur), fmtAperture);
+  fillSelect(e.shSel, d.shutter && d.shutter.opts,
+             desired(e, 'shutter', d.shutter && d.shutter.cur), fmtShutter);
+  toggleSteps(e.apMinus, e.apPlus, e.apSel);
+  toggleSteps(e.shMinus, e.shPlus, e.shSel);
 
   // уровень микрофона: показываем, только если камера его отдаёт
   const mg = d.micGain && Array.isArray(d.micGain.opts) ? d.micGain.opts : [];
   e.micBox.style.display = mg.length ? '' : 'none';
   if(mg.length){
-    fillSelect(e.micSel, mg, d.micGain.cur, null);
-    // список из одного значения перебирать нечем — стрелки гасим, чтобы клик
-    // не выглядел сломанным
-    e.micMinus.classList.toggle('off', e.micSel.disabled);
-    e.micPlus .classList.toggle('off', e.micSel.disabled);
+    fillSelect(e.micSel, mg, desired(e, 'micgain', d.micGain.cur), null);
+    toggleSteps(e.micMinus, e.micPlus, e.micSel);
   }
 
-  // ББ в кельвинах — ближайший пресет
-  if(d.wbKelvin!=null){ const k = String(nearestK(d.wbKelvin)); if(e.wbSel.value !== k) e.wbSel.value = k; }
+  // ББ в кельвинах. Камера объявляет диапазон [min, max, шаг] — строим список по
+  // нему. Раньше здесь были свои пресеты и округление к ближайшему, из-за чего
+  // панель показывала не то, что стоит на камере (у ZV-E1 шаг 100 K).
+  const kr = Array.isArray(d.wbKelvinRange) ? d.wbKelvinRange : null;
+  if(kr && kr[1] > kr[0]){
+    const [lo, hi, st] = [kr[0], kr[1], kr[2] > 0 ? kr[2] : 100];
+    const sig = `${lo}-${hi}-${st}`;
+    if(e.wbSig !== sig){                       // список длинный — пересобираем только при смене диапазона
+      e.wbOpts = [];
+      for(let k = lo; k <= hi; k += st) e.wbOpts.push([k, k + 'K']);
+      e.wbSig = sig;
+    }
+    fillSelect(e.wbSel, e.wbOpts, desired(e, 'wbkelvin', d.wbKelvin), null);
+  }else if(d.wbKelvin!=null){                  // камера диапазон не отдала — старый путь
+    const k = String(desired(e, 'wbkelvin', nearestK(d.wbKelvin)));
+    if(e.wbSel.value !== k) e.wbSel.value = k;
+  }
+  toggleSteps(e.wbMinus, e.wbPlus, e.wbSel);
 }
 
 /* =========================================================================
@@ -1048,15 +1134,29 @@ async function groupStep(g, what, dir){
     const d = e.last;
     let action = null, value = null;
     if(what === 'iso'){
-      action = 'iso';  value = nextFromList(CONFIG.isoValues.map(String), d.iso, dir);
+      // Список ISO у каждой камеры свой (модель + режим), поэтому шаг считаем по
+      // списку, который прислала ИМЕННО ЭТА камера, а не по общей таблице.
+      action = 'iso';
+      value = (d.isoOpts && Array.isArray(d.isoOpts.opts) && d.isoOpts.opts.length)
+                ? nextFromOpts(d.isoOpts.opts, d.isoOpts.cur, dir)
+                : nextFromList(CONFIG.isoValues.map(String), d.iso, dir);
     }else if(what === 'aperture'){
       action = 'aperture'; value = nextFromOpts(d.aperture && d.aperture.opts, d.aperture && d.aperture.cur, dir);
     }else if(what === 'shutter'){
       action = 'shutter';  value = nextFromOpts(d.shutter && d.shutter.opts, d.shutter && d.shutter.cur, dir);
     }else if(what === 'wb'){
+      // Шаг кельвинов — тот, который объявила камера (у ZV-E1 это 100 K), а не
+      // прыжок по нашим пресетам.
       action = 'wbkelvin';
-      const cur = (d.wbKelvin != null && d.wbKelvin > 0) ? nearestK(d.wbKelvin) : null;
-      value = cur == null ? null : nextFromList(CONFIG.kelvinValues.map(String), cur, dir);
+      const kr = Array.isArray(d.wbKelvinRange) ? d.wbKelvinRange : null;
+      if(kr && d.wbKelvin != null && d.wbKelvin > 0){
+        const st = kr[2] > 0 ? kr[2] : 100;
+        const next = d.wbKelvin + dir * st;
+        value = (next >= kr[0] && next <= kr[1]) ? String(next) : null;
+      }else{
+        const cur = (d.wbKelvin != null && d.wbKelvin > 0) ? nearestK(d.wbKelvin) : null;
+        value = cur == null ? null : nextFromList(CONFIG.kelvinValues.map(String), cur, dir);
+      }
     }
     if(action && value != null) jobs.push(cmd({cam:e.camNum, action, value}));
   }

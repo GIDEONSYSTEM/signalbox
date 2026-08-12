@@ -636,10 +636,18 @@ static std::string buildStatusJson() {
         j += "\"writing\":" + std::string(s.writing ? "true" : "false") + ",";
         j += "\"iso\":"     + (s.iso.empty() ? std::string("null") : "\"" + jsonEscape(s.iso) + "\"") + ",";
         j += "\"isoEff\":"  + (s.isoEff < 0 ? std::string("null") : std::to_string(s.isoEff)) + ",";
+        // Список ISO самой камеры: панель больше не гадает по зашитой таблице.
+        j += "\"isoOpts\":" + propOptsJson(s.isoOpts) + ",";
         j += "\"aperture\":" + propOptsJson(s.aperture) + ",";
         j += "\"shutter\":"  + propOptsJson(s.shutter) + ",";
         j += "\"wb\":"       + propOptsJson(s.wb) + ",";
         j += "\"wbKelvin\":" + (s.wbKelvin < 0 ? std::string("null") : std::to_string(s.wbKelvin)) + ",";
+        // Диапазон цвет. температуры как его объявила камера: [min, max, шаг].
+        // null — камера диапазон не отдала, панель тогда покажет своё старое поведение.
+        j += "\"wbKelvinRange\":" + ((s.wbKelvinMin < 0 || s.wbKelvinMax < 0)
+                 ? std::string("null")
+                 : "[" + std::to_string(s.wbKelvinMin) + "," + std::to_string(s.wbKelvinMax) +
+                   "," + std::to_string(s.wbKelvinStep) + "]") + ",";
         j += "\"micGain\":"  + propOptsJson(s.micGain);
         j += "}";
     }
