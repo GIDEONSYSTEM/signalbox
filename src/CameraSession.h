@@ -27,6 +27,11 @@ void setLogSink(std::function<void(const std::string&)> sink);
 struct CamPropOpts {
     long long                                       cur = -1;   // -1 = unknown
     std::vector<std::pair<long long, std::string>>  opts;
+    // Можно ли менять свойство ПРЯМО СЕЙЧАС: камера сообщает это сама
+    // (IsSetEnableCurrentValue). В режимах P/Auto выдержка и диафрагма не
+    // пишутся, и раньше панель предлагала их менять впустую. Так делает и сэмпл
+    // Sony: перед установкой он проверяет тот же флаг.
+    bool                                            writable = false;
 };
 
 struct CamStatus {
@@ -51,6 +56,7 @@ struct CamStatus {
     int         wbKelvinMin  = -1;
     int         wbKelvinMax  = -1;
     int         wbKelvinStep = -1;
+    bool        wbKelvinWritable = false;   // ББ по кельвинам пишется только в режиме «цвет. темп-ра»
     CamPropOpts micGain;            // уровень записи микрофона (AudioInputMasterLevel, 0..31)
 };
 

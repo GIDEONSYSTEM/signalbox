@@ -944,7 +944,7 @@ function stepSelect(e, sel, key, action, dir){
 }
 
 /* ---------- заполнение динамических списков (диафрагма/выдержка) ---------- */
-function fillSelect(sel, opts, cur, fmt){
+function fillSelect(sel, opts, cur, fmt, writable){
   opts = Array.isArray(opts) ? opts : [];
   if(!opts.length && cur!=null && fmt){ const lbl = fmt(cur); if(lbl) opts = [[cur, lbl]]; }
   const sig = opts.map(o=>o[0]).join(',');
@@ -954,7 +954,10 @@ function fillSelect(sel, opts, cur, fmt){
       : '<option value="">—</option>';
     sel.dataset.sig = sig;
   }
-  sel.disabled = opts.length <= 1;
+  // writable — ответ САМОЙ камеры на вопрос «можно ли это сейчас менять»
+  // (в режимах P/Auto выдержка не пишется, у мануальной оптики — диафрагма).
+  // undefined = камера не сказала, ведём себя как раньше.
+  sel.disabled = (writable === false) || opts.length <= 1;
   const curStr = String(cur);
   if(sel.value !== curStr) sel.value = curStr;
 }
@@ -995,19 +998,22 @@ function updateCard(e, d){
   const isoOpts = (d.isoOpts && Array.isArray(d.isoOpts.opts) ? d.isoOpts.opts : [])
                     .map(o => [o[0], o[1] === 'AUTO' ? 'АВТО' : o[1]]);
   if(isoOpts.length){
-    fillSelect(e.isoSel, isoOpts, desired(e, 'iso', d.isoOpts.cur), null);
+    fillSelect(e.isoSel, isoOpts, desired(e, 'iso', d.isoOpts.cur), null, d.isoOpts.rw);
   }else if(d.iso!==undefined){
     const s = String(desired(e, 'iso', d.iso));
     if(e.isoSel.value !== s) e.isoSel.value = s;
+    e.isoSel.disabled = (d.isoOpts && d.isoOpts.rw === false);
   }
   e.isoEffEl.textContent = d.iso==="AUTO" ? `эфф. ${d.isoEff ?? ''}` : '';
   toggleSteps(e.minus, e.plus, e.isoSel);
 
   // диафрагма / выдержка
   fillSelect(e.apSel, d.aperture && d.aperture.opts,
-             desired(e, 'aperture', d.aperture && d.aperture.cur), fmtAperture);
+             desired(e, 'aperture', d.aperture && d.aperture.cur), fmtAperture,
+             d.aperture && d.aperture.rw);
   fillSelect(e.shSel, d.shutter && d.shutter.opts,
-             desired(e, 'shutter', d.shutter && d.shutter.cur), fmtShutter);
+             desired(e, 'shutter', d.shutter && d.shutter.cur), fmtShutter,
+             d.shutter && d.shutter.rw);
   toggleSteps(e.apMinus, e.apPlus, e.apSel);
   toggleSteps(e.shMinus, e.shPlus, e.shSel);
 
@@ -1015,7 +1021,7 @@ function updateCard(e, d){
   const mg = d.micGain && Array.isArray(d.micGain.opts) ? d.micGain.opts : [];
   e.micBox.style.display = mg.length ? '' : 'none';
   if(mg.length){
-    fillSelect(e.micSel, mg, desired(e, 'micgain', d.micGain.cur), null);
+    fillSelect(e.micSel, mg, desired(e, 'micgain', d.micGain.cur), null, d.micGain.rw);
     toggleSteps(e.micMinus, e.micPlus, e.micSel);
   }
 
@@ -1031,10 +1037,11 @@ function updateCard(e, d){
       for(let k = lo; k <= hi; k += st) e.wbOpts.push([k, k + 'K']);
       e.wbSig = sig;
     }
-    fillSelect(e.wbSel, e.wbOpts, desired(e, 'wbkelvin', d.wbKelvin), null);
+    fillSelect(e.wbSel, e.wbOpts, desired(e, 'wbkelvin', d.wbKelvin), null, d.wbKelvinRw);
   }else if(d.wbKelvin!=null){                  // камера диапазон не отдала — старый путь
     const k = String(desired(e, 'wbkelvin', nearestK(d.wbKelvin)));
     if(e.wbSel.value !== k) e.wbSel.value = k;
+    e.wbSel.disabled = (d.wbKelvinRw === false);
   }
   toggleSteps(e.wbMinus, e.wbPlus, e.wbSel);
 }

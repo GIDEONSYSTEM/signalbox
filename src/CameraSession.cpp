@@ -332,6 +332,7 @@ CamStatus CameraSession::readStatusLocked() {
                 // и setIso нужно само число — точное значение setIso потом
                 // подберёт обратно по списку камеры.
                 s.isoOpts.cur = static_cast<long long>(iv);
+                s.isoOpts.writable = props[i].IsSetEnableCurrentValue();
                 const auto* arr = reinterpret_cast<const std::uint32_t*>(props[i].GetValues());
                 if (arr) {
                     const CrInt32u cnt = props[i].GetValueSize() / sizeof(std::uint32_t);
@@ -351,6 +352,7 @@ CamStatus CameraSession::readStatusLocked() {
             }
             case SDK::CrDevicePropertyCode::CrDeviceProperty_FNumber: {
                 s.aperture.cur = static_cast<long long>(static_cast<std::uint16_t>(val));
+                s.aperture.writable = props[i].IsSetEnableCurrentValue();
                 const auto* arr = reinterpret_cast<const std::uint16_t*>(props[i].GetValues());
                 if (arr) { CrInt32u cnt = props[i].GetValueSize() / sizeof(std::uint16_t);
                     for (CrInt32u k = 0; k < cnt; ++k) { std::string l = apertureLabel(arr[k]);
@@ -359,6 +361,7 @@ CamStatus CameraSession::readStatusLocked() {
             }
             case SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterSpeed: {
                 s.shutter.cur = static_cast<long long>(static_cast<std::uint32_t>(val));
+                s.shutter.writable = props[i].IsSetEnableCurrentValue();
                 const auto* arr = reinterpret_cast<const std::uint32_t*>(props[i].GetValues());
                 if (arr) { CrInt32u cnt = props[i].GetValueSize() / sizeof(std::uint32_t);
                     for (CrInt32u k = 0; k < cnt; ++k) { std::string l = shutterLabel(arr[k]);
@@ -367,6 +370,7 @@ CamStatus CameraSession::readStatusLocked() {
             }
             case SDK::CrDevicePropertyCode::CrDeviceProperty_WhiteBalance: {
                 s.wb.cur = static_cast<long long>(static_cast<std::uint16_t>(val));
+                s.wb.writable = props[i].IsSetEnableCurrentValue();
                 const auto* arr = reinterpret_cast<const std::uint16_t*>(props[i].GetValues());
                 if (arr) { CrInt32u cnt = props[i].GetValueSize() / sizeof(std::uint16_t);
                     for (CrInt32u k = 0; k < cnt; ++k) { std::string l = wbLabel(arr[k]);
@@ -378,6 +382,7 @@ CamStatus CameraSession::readStatusLocked() {
                 // 0x0000 = ниже min, 0xFFFF = выше max — оба отсекаются диапазоном.
                 std::uint32_t k = static_cast<std::uint32_t>(val);
                 if (k >= 1000 && k <= 50000) s.wbKelvin = static_cast<int>(k);
+                s.wbKelvinWritable = props[i].IsSetEnableCurrentValue();
                 // Тип свойства — UInt16Range, поэтому значения приходят не списком,
                 // а границами [min, max, шаг] (как у AudioInputMasterLevel). Сам шаг
                 // у ZV-E1 равен 100 K; раньше панель об этом не знала и округляла
@@ -395,6 +400,7 @@ CamStatus CameraSession::readStatusLocked() {
                 // Уровень записи микрофона. Диапазон приходит как [min, max, шаг];
                 // варианты строим сами — камера отдаёт границы, а не список.
                 s.micGain.cur = static_cast<long long>(static_cast<std::uint16_t>(val));
+                s.micGain.writable = props[i].IsSetEnableCurrentValue();
                 const auto* arr = reinterpret_cast<const std::uint16_t*>(props[i].GetValues());
                 const CrInt32u cnt = arr ? props[i].GetValueSize() / sizeof(std::uint16_t) : 0;
                 if (cnt >= 3) {

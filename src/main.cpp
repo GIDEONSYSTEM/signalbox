@@ -595,14 +595,16 @@ static std::string friendlyModel(const std::string& m) {
     return m;
 }
 
-// Serialize a selectable property: {"cur":N|null,"opts":[[enc,"label"],...]}.
+// Serialize a selectable property: {"cur":N|null,"opts":[[enc,"label"],...],"rw":bool}.
+// rw — можно ли менять свойство прямо сейчас (камера сообщает это сама). Панель
+// по нему гасит контрол, вместо того чтобы предлагать menять то, что не меняется.
 static std::string propOptsJson(const coll::CamPropOpts& p) {
     std::string j = "{\"cur\":" + (p.cur < 0 ? std::string("null") : std::to_string(p.cur)) + ",\"opts\":[";
     for (size_t k = 0; k < p.opts.size(); ++k) {
         if (k) j += ",";
         j += "[" + std::to_string(p.opts[k].first) + ",\"" + jsonEscape(p.opts[k].second) + "\"]";
     }
-    j += "]}";
+    j += "],\"rw\":" + std::string(p.writable ? "true" : "false") + "}";
     return j;
 }
 
@@ -644,6 +646,7 @@ static std::string buildStatusJson() {
         j += "\"wbKelvin\":" + (s.wbKelvin < 0 ? std::string("null") : std::to_string(s.wbKelvin)) + ",";
         // Диапазон цвет. температуры как его объявила камера: [min, max, шаг].
         // null — камера диапазон не отдала, панель тогда покажет своё старое поведение.
+        j += "\"wbKelvinRw\":" + std::string(s.wbKelvinWritable ? "true" : "false") + ",";
         j += "\"wbKelvinRange\":" + ((s.wbKelvinMin < 0 || s.wbKelvinMax < 0)
                  ? std::string("null")
                  : "[" + std::to_string(s.wbKelvinMin) + "," + std::to_string(s.wbKelvinMax) +
