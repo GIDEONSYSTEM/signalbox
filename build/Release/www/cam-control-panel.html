@@ -198,17 +198,19 @@
   .card.rec::before{background:var(--crit); box-shadow:0 0 12px var(--crit);}
 
   .crow{display:flex; align-items:center; justify-content:space-between; margin-bottom:11px;}
-  .cam{font-weight:700; letter-spacing:.05em; font-size:18px; text-transform:uppercase; white-space:nowrap;}
+  .cam{font-weight:700; letter-spacing:.05em; font-size:18px; text-transform:uppercase; white-space:nowrap;
+       min-width:0; overflow:hidden; text-overflow:ellipsis;}
   .model{font-family:var(--cond); font-weight:600; letter-spacing:.04em; font-size:10px;
          color:var(--ink-dim); text-transform:uppercase; margin-top:3px;}
   .cinfo{flex:1; min-width:0;}
-  .ctop{display:flex; align-items:center; gap:12px;}   /* модель · аккумулятор · карта · статус — одной строкой */
-  .ctop .state{margin-left:auto;}                       /* статус STBY/REC — к правому краю */
-  .state{display:flex; align-items:center; gap:6px; font-family:var(--cond); font-weight:700;
-         letter-spacing:.12em; font-size:12px; color:var(--idle);}
-  .state .dot{width:9px;height:9px;border-radius:50%; background:var(--idle);}
-  .card.rec .state{color:var(--crit);}
-  .card.rec .state .dot{background:var(--crit); animation:pulse 1.1s infinite; box-shadow:0 0 9px var(--crit);}
+  /* модель · аккумулятор · карта · ЗАПИСЬ · статус — одной строкой.
+     Элементов пять, поэтому зазор меньше прежнего, а имя модели при нехватке
+     места сокращается многоточием, а не выталкивает строку за карточку. */
+  .ctop{display:flex; align-items:center; gap:8px; min-width:0;}
+  /* Бейджа STBY/REC больше нет: состояние показывает сама кнопка REC —
+     зелёная в ожидании, красная во время записи. Два индикатора одного и того
+     же рядом только занимали место в строке шапки. */
+  .ctop .rec-btn{margin-left:auto;}                     /* кнопка REC — к правому краю строки */
   /* метрики: остаток на карте */
   .metrics{display:flex; gap:14px; margin-bottom:11px;}
   .metric{flex:1; display:flex; align-items:center; gap:10px;}
@@ -241,13 +243,16 @@
               background:rgba(0,0,0,.28); border-radius:1px;}
   .num-ok{color:var(--ok)!important} .num-warn{color:var(--warn)!important} .num-crit{color:var(--crit)!important}
 
-  .controls{display:flex; gap:10px; align-items:stretch;}
+  /* Экспозиция одной строкой: ISO · Shutter · Aperture. Кнопка ЗАПИСЬ отсюда
+     переехала в шапку карточки — к модели и остатку карты. */
+  .controls{display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px;}
 
-  /* REC button */
-  .rec-btn{flex:0 0 84px; border-radius:9px; cursor:pointer; user-select:none;
+  /* REC button — теперь живёт в строке шапки (.ctop), поэтому компактная:
+     высота по строке, а не по блоку регуляторов. */
+  .rec-btn{flex:0 0 auto; padding:0 10px; height:26px; border-radius:7px; cursor:pointer; user-select:none;
            border:1.5px solid rgba(65,214,126,.5); background:rgba(65,214,126,.08); color:var(--ok);
-           font-family:var(--ui); font-weight:700; letter-spacing:.06em; text-transform:uppercase; font-size:12px;
-           display:flex; align-items:center; justify-content:center; gap:7px; transition:.15s;}
+           font-family:var(--ui); font-weight:700; letter-spacing:.06em; text-transform:uppercase; font-size:11px;
+           display:flex; align-items:center; justify-content:center; gap:6px; transition:.15s; white-space:nowrap;}
   .rec-btn:hover{filter:brightness(1.12);}
   .rec-btn:active{transform:translateY(1px);}
   .rec-btn .ic{width:9px;height:9px;border-radius:50%;background:var(--ok);}
@@ -255,27 +260,18 @@
   .card.rec .rec-btn .ic{background:var(--crit);border-radius:50%;}
   .rec-btn.pending{opacity:.55; pointer-events:none;}
 
-  /* 🔴 ВСЕ ШЕСТЬ РЕГУЛЯТОРОВ — ОДИН ВИД: подпись сверху по центру, под ней
-     «− значение +», без рамок и подложек. Раньше ISO и Mic Gain сидели в
-     коробках с фоном и границей, а второй ряд был голый, и ряды читались как
-     разные элементы. Метрики (размер стрелок, поля значения, кегль подписи)
-     заданы ОДИН раз ниже и общие для обоих рядов — иначе они опять разъедутся. */
-  .iso, .mic{display:flex; flex-direction:column; gap:3px; min-width:0;}
-  .iso{flex:0 0 auto;}
-  .mic{flex:1 1 auto; min-width:0;}
+  /* 🔴 ВСЕ ПЯТЬ РЕГУЛЯТОРОВ — ОДИН ВИД: подпись сверху по центру, под ней
+     «− значение +», без рамок и подложек. Раскладка у всех одна (.ctl), метрики
+     заданы ОДИН раз — иначе ряды опять разъедутся по высоте, как было раньше. */
   /* подпись и «эфф. ISO» — в одну строку по центру, иначе блок вырастает втрое */
   .iso-top{flex:none; display:flex; flex-direction:row; align-items:baseline;
            justify-content:center; gap:6px; line-height:1.15;}
-  /* nowrap обязателен: «Mic Gain» — два слова, в узком блоке подпись
-     переносилась на вторую строку и первый ряд становился выше второго */
-  .iso-lab{font-family:var(--cond); font-weight:600; letter-spacing:.08em; font-size:9px;
-           color:var(--ink-dim); text-transform:uppercase; white-space:nowrap;}
   .iso-eff{font-family:var(--mono); font-weight:700; font-size:9px; color:var(--ink-dim);}
   /* «эфф. ISO» показывается только в АВТО. Пустой span всё равно съедал бы свой
      gap и сдвигал подпись ISO влево от центра — поэтому убираем его совсем. */
   .iso-eff:empty{display:none;}
-  /* ряд «− значение +» — общий для обоих рядов карточки */
-  .iso-row, .ctl-row{flex:none; display:flex; align-items:center; justify-content:center;
+  /* ряд «− значение +» — общий для всех регуляторов карточки */
+  .ctl-row{flex:none; display:flex; align-items:center; justify-content:center;
         gap:3px; min-width:0;}
   .step{flex:none; width:19px; height:24px; border-radius:5px; border:1px solid var(--edge);
         background:#1c222b; color:var(--ink); font-family:var(--mono); font-weight:800; font-size:13px;
@@ -286,17 +282,17 @@
            background:#1c222b; border:1px solid var(--edge); border-radius:7px; color:var(--ink);
            font-family:var(--mono); font-weight:800; font-size:15px; padding:4px 6px; cursor:pointer; width:100%;}
   /* Значение — по содержимому, а не на всю ширину: тогда «− значение +» стоит
-     по центру блока. Поля и кегль общие для всех шести регуляторов. */
-  .iso-sel, .mic-sel, .ctl-row .ctl-sel{
+     по центру блока. Поля и кегль общие для всех регуляторов. */
+  .ctl-row .iso-sel, .ctl-row .ctl-sel{
         font-size:13px; padding:4px 6px; flex:0 1 auto; width:auto; min-width:0;}
   .iso-sel:focus,.ctl-sel:focus{outline:none; border-color:rgba(255,255,255,.3);}
   .ctl-sel:disabled{opacity:.4; cursor:default;}
   /* нечего перебирать (камера отдала одно значение или ни одного) — гасим стрелки */
   .step.off{opacity:.35; pointer-events:none;}
 
-  /* второй ряд контролов: Aperture · Shutter · WB. Метрики общие с первым рядом
+  /* вторая строка регуляторов: Mic Gain · WB. Метрики общие с первой строкой
      (см. блок выше), здесь только раскладка колонками. */
-  .controls2{display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-top:6px;}
+  .controls2{display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px;}
   .ctl{display:flex; flex-direction:column; gap:3px; min-width:0;}
   /* line-height и nowrap — те же, что у подписи первого ряда: без этого строки
      подписей разной высоты и ряды не сходятся по вертикали */
@@ -755,35 +751,31 @@ function buildCard(cam){
             <div class="bolt" title="Питание от сети">${BOLT_SVG}</div>
           </div>
           <div class="cardm"><div class="sd"></div><div class="val card-val">--<span class="u">мин</span></div></div>
-          <div class="state"><span class="dot"></span><span class="lab">STBY</span></div>
+          <div class="rec-btn" title="Старт и стоп записи"><span class="ic"></span><span class="t">REC</span></div>
         </div>
       </div>
     </div>
+    <!-- экспозиция одной строкой: ISO · Shutter · Aperture -->
     <div class="controls">
-      <div class="rec-btn"><span class="ic"></span><span class="t">ЗАПИСЬ</span></div>
-      <div class="iso">
-        <div class="iso-top"><span class="iso-lab">ISO</span><span class="iso-eff"></span></div>
-        <div class="iso-row">
+      <div class="ctl iso">
+        <div class="iso-top"><span class="ctl-lab">ISO</span><span class="iso-eff"></span></div>
+        <div class="ctl-row">
           <div class="step minus">−</div>
           <select class="iso-sel">${ISO_OPTS}</select>
           <div class="step plus">+</div>
         </div>
       </div>
-      <div class="mic">
-        <div class="iso-top"><span class="iso-lab">Mic Gain</span></div>
-        <div class="iso-row">
-          <div class="step mic-minus">−</div>
-          <select class="ctl-sel mic-sel"></select>
-          <div class="step mic-plus">+</div>
-        </div>
+      <div class="ctl"><span class="ctl-lab">Shutter</span>
+        <div class="ctl-row"><div class="step sh-minus">−</div><select class="ctl-sel sh-sel"></select><div class="step sh-plus">+</div></div>
       </div>
-    </div>
-    <div class="controls2">
       <div class="ctl"><span class="ctl-lab">Aperture</span>
         <div class="ctl-row"><div class="step ap-minus">−</div><select class="ctl-sel ap-sel"></select><div class="step ap-plus">+</div></div>
       </div>
-      <div class="ctl"><span class="ctl-lab">Shutter</span>
-        <div class="ctl-row"><div class="step sh-minus">−</div><select class="ctl-sel sh-sel"></select><div class="step sh-plus">+</div></div>
+    </div>
+    <!-- звук и баланс белого — вторая строка -->
+    <div class="controls2">
+      <div class="ctl mic"><span class="ctl-lab">Mic Gain</span>
+        <div class="ctl-row"><div class="step mic-minus">−</div><select class="ctl-sel mic-sel"></select><div class="step mic-plus">+</div></div>
       </div>
       <div class="ctl"><span class="ctl-lab">WB</span>
         <div class="ctl-row"><div class="step wb-minus">−</div><select class="ctl-sel wb-sel">${KELVIN_OPTS}</select><div class="step wb-plus">+</div></div>
@@ -815,11 +807,9 @@ function buildCard(cam){
   const e = {
     id: cam.id, camNum, card,
     rec: false, iso: 'AUTO',
-    stateLab: card.querySelector('.state .lab'),
     fill:     card.querySelector('.battery .fill'),
     cardVal:  card.querySelector('.card-val'),
     recBtn:   card.querySelector('.rec-btn'),
-    recTxt:   card.querySelector('.rec-btn .t'),
     isoSel:   card.querySelector('.iso-sel'),
     micBox:   card.querySelector('.mic'),
     micSel:   card.querySelector('.mic-sel'),
@@ -978,9 +968,10 @@ function updateCard(e, d){
   e.rec = !!d.rec;
   e.card.classList.toggle('rec', e.rec);
   e.card.classList.toggle('on-power', !!d.acPower);
-  e.stateLab.textContent = e.rec ? 'REC' : 'STBY';
+  // Кнопка REC сама и есть индикатор: зелёная — ждём, красная — идёт запись
+  // (цвет задаёт класс .rec на карточке). Текст при этом не меняется: «STOP»
+  // на красной кнопке читался бы как «остановлено», а не «идёт запись».
   e.recBtn.classList.remove('pending');
-  e.recTxt.textContent = e.rec ? '● ЗАП' : 'ЗАПИСЬ';
 
   // заряд — только шкала (проценты убраны), зелёный чуть темнее
   const b = Math.max(0, Math.min(100, Math.round(d.battery ?? 0)));
