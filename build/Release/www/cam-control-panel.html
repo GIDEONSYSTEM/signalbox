@@ -750,10 +750,28 @@ function lvFsEnter(e){
   document.body.classList.add('lv-fs-on');
   e.lvApKey = null;                            // размеры пересчитать под окно
   lvApplyRotation(e);
+
+  // Настоящий полноэкранный режим устройства — как у видео на ютубе: убирает
+  // адресную строку и панели браузера. Без него на телефоне в альбомной
+  // ориентации половину экрана съедала обвязка браузера.
+  // Запрашивать можно только из обработчика клика — мы как раз в нём.
+  // ⚠️ Safari на iPhone разворачивает так только <video>, обычному элементу
+  // откажет. Тогда остаётся наш CSS-режим: он уже растянут на всё окно.
+  const req = e.lvFrame.requestFullscreen || e.lvFrame.webkitRequestFullscreen;
+  if(req && (document.fullscreenEnabled !== false)){
+    try{ const p = req.call(e.lvFrame); if(p && p.catch) p.catch(()=>{}); }catch(_){}
+  }
 }
 
 function lvFsExit(e){
   if(!e || !e.lvFrame.classList.contains('fs')) return;
+  // Сначала отпускаем полноэкранный режим устройства, потом возвращаем узлы:
+  // иначе браузер выйдет из него сам, когда элемент уедет из <body>.
+  const cur = document.fullscreenElement || document.webkitFullscreenElement;
+  if(cur === e.lvFrame){
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if(exit){ try{ const p = exit.call(document); if(p && p.catch) p.catch(()=>{}); }catch(_){} }
+  }
   e.lvFrame.classList.remove('fs');
   for(const [node, parent, before] of (e.lvHome || [])) parent.insertBefore(node, before);
   e.lvHome = null;
@@ -768,6 +786,15 @@ function lvFsExit(e){
 document.addEventListener('keydown', ev => {
   if(ev.key === 'Escape' && lvFsCurrent){ ev.stopPropagation(); lvFsExit(lvFsCurrent); }
 }, true);
+
+// Из полноэкранного режима устройства выходят и мимо нашей кнопки: жестом,
+// системной «назад», Escape. Тогда сворачиваем и свой режим — иначе кадр
+// остался бы растянутым поверх панели.
+['fullscreenchange','webkitfullscreenchange'].forEach(ev =>
+  document.addEventListener(ev, () => {
+    const cur = document.fullscreenElement || document.webkitFullscreenElement;
+    if(!cur && lvFsCurrent) lvFsExit(lvFsCurrent);
+  }));
 function lvDraw(e){
   const frames = e.lvFrames || [];
   let s='';
