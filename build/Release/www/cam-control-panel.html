@@ -91,8 +91,9 @@
   .share-url:hover{text-decoration:underline;}
   .share-qr{flex:none; width:120px; height:120px; border-radius:6px; overflow:hidden; background:#fff; cursor:zoom-in;}
   .share-qr svg{display:block; width:100%; height:100%;}
-  /* 🔴 ПОРЯДОК СЛОЁВ (все они — соседи на уровне body, поэтому решает только z-index):
+  /* 🔴 ПОРЯДОК СЛОЁВ (решает только z-index — все они вне потока карточки):
         100  тост-уведомление — видно всегда
+         95  Live View на весь экран
          90  QR во весь экран — ОТКРЫВАЕТСЯ ИЗ окна настроек, значит обязан быть выше него
          80  окно настроек
          70  экран «SignalBox выключен»
@@ -327,6 +328,35 @@
          font-family:var(--cond); font-weight:600; letter-spacing:.12em; font-size:11px;
          text-transform:uppercase; color:var(--ink-dim); opacity:.55;}
   .lv-frame.has-img .lv-ph{display:none;}
+  /* ---- полноэкранный Live View ----
+     Слой 95: выше окна настроек (80) и QR (90), ниже тоста (100). Кадр
+     раскрывается на всё окно прямо на месте, без переноса узлов в другой
+     контейнер — поток и обработчики продолжают жить те же. */
+  .lv-fs{position:absolute; right:8px; bottom:8px; z-index:2; display:none;
+         align-items:center; justify-content:center; width:28px; height:28px; padding:0;
+         border:1px solid rgba(255,255,255,.22); border-radius:7px; cursor:pointer;
+         background:rgba(10,13,18,.55); color:#fff; line-height:0;}
+  .lv-frame.has-img .lv-fs{display:inline-flex;}   /* без кадра разворачивать нечего */
+  .lv-fs:hover{background:rgba(10,13,18,.8); border-color:rgba(255,255,255,.4);}
+  /* 🔴 Класс висит на САМОМ кадре, а не на разделе: на время полноэкранного
+     режима узел переезжает в <body>. Иначе `position:fixed` считался бы от
+     карточки — у .card есть transform, а трансформация у предка делает fixed
+     относительным к нему (проверено: кадр раскрывался на 329×222 вместо окна). */
+  .lv-frame.fs{position:fixed; inset:0; z-index:95; margin:0; border-radius:0;
+                   background:#000; height:auto !important;}
+  .lv-frame.fs .lv-fs{display:none;}               /* внутри полноэкранного кнопка входа не нужна */
+  .lv-bar{display:none;}
+  .lv-frame.fs .lv-bar{display:flex; align-items:center; gap:14px; z-index:3;
+                 position:absolute; left:50%; bottom:16px; transform:translateX(-50%);
+                 background:rgba(10,13,18,.72); border:1px solid rgba(255,255,255,.16);
+                 border-radius:11px; padding:8px 14px;}
+  .lv-bar .lv-rot, .lv-bar .lv-fs-exit{display:inline-flex; align-items:center; justify-content:center;
+                 width:26px; height:26px; padding:0; line-height:0; cursor:pointer;
+                 background:none; border:none; color:#fff;}
+  .lv-bar .lv-toggles{margin-top:0;}
+  .lv-bar .lv-fr{margin-top:0; color:#fff;}
+  body.lv-fs-on{overflow:hidden;}                  /* фон не должен прокручиваться под кадром */
+
   .lv-fr{display:inline-flex; align-items:center; gap:7px; margin-top:8px; cursor:pointer;
          font-family:var(--cond); font-weight:600; letter-spacing:.06em; font-size:10px;
          text-transform:uppercase; color:var(--ink-dim); user-select:none;}
@@ -659,12 +689,31 @@ async function cmd(payload){
 /* ---------- live view (по запросу, ~7 fps) ---------- */
 // Размер/поворот окна под ориентацию: 0/180 — 16:9, 90/270 — портрет во всю ширину.
 function lvApplyRotation(e){
+  const A = 16/9;
+  const rot = e.lvRot||0;
+  const fs = e.lvFrame.classList.contains('fs');
+
+  if(fs){
+    // На весь экран: кадр ВПИСЫВАЕТСЯ в окно целиком, высоту задаёт inset:0.
+    // После поворота на 90/270 стороны меняются местами, поэтому и ограничение
+    // другое: до поворота ширина станет высотой экрана.
+    const W = window.innerWidth, H = window.innerHeight;
+    const key = `fs:${W}x${H}:${rot}`;
+    if(key === e.lvApKey) return;              // ни размер окна, ни поворот не менялись
+    e.lvApKey = key;
+    const w = (rot===90 || rot===270) ? Math.min(H, W*A) : Math.min(W, H*A);
+    e.lvMedia.style.width  = w+'px';
+    e.lvMedia.style.height = (w/A)+'px';
+    e.lvFrame.style.height = '';               // высоту держит inset:0, не трогаем
+    e.lvMedia.style.transform = `translate(-50%,-50%) rotate(${rot}deg)`;
+    return;
+  }
+
   const W = e.lvFrame.clientWidth;
   if(!W) return;
-  const rot = e.lvRot||0;
-  if(W===e.lvApW && rot===e.lvApRot) return;   // без изменений — не дёргаем layout
-  e.lvApW=W; e.lvApRot=rot;
-  const A = 16/9;
+  const key = `n:${W}:${rot}`;
+  if(key === e.lvApKey) return;                // без изменений — не дёргаем layout
+  e.lvApKey = key;
   if(rot===90 || rot===270){
     const mw = W*A;                       // до поворота: ширина (станет высотой окна)
     e.lvMedia.style.width  = mw+'px';
@@ -678,6 +727,47 @@ function lvApplyRotation(e){
   }
   e.lvMedia.style.transform = `translate(-50%,-50%) rotate(${rot}deg)`;
 }
+
+/* ---------- Live View на весь экран ----------
+   Кадр раскрывается на месте (CSS-класс на разделе), а органы управления —
+   поворот и галочки рамок — ПЕРЕЕЗЖАЮТ в панель поверх картинки и возвращаются
+   обратно при выходе. Копий не делаем: два набора одних и тех же переключателей
+   разошлись бы состоянием, как когда-то разъезжались настройки (§10 доки). */
+let lvFsCurrent = null;                        // чей режим открыт сейчас (он один на всю панель)
+
+function lvFsEnter(e){
+  if(lvFsCurrent) lvFsExit(lvFsCurrent);       // одновременно может быть только один
+  lvFsCurrent = e;
+  // Запоминаем, откуда взяли узлы, чтобы вернуть ровно на место. Сам кадр
+  // переезжает в <body>: внутри карточки position:fixed считался бы от неё.
+  e.lvHome = [[e.lvRotBtn, e.lvRotBtn.parentNode, e.lvRotBtn.nextSibling],
+              [e.lvToggles, e.lvToggles.parentNode, e.lvToggles.nextSibling],
+              [e.lvFrame, e.lvFrame.parentNode, e.lvFrame.nextSibling]];
+  e.lvBar.insertBefore(e.lvRotBtn, e.lvExitBtn);
+  e.lvBar.insertBefore(e.lvToggles, e.lvExitBtn);
+  document.body.appendChild(e.lvFrame);
+  e.lvFrame.classList.add('fs');
+  document.body.classList.add('lv-fs-on');
+  e.lvApKey = null;                            // размеры пересчитать под окно
+  lvApplyRotation(e);
+}
+
+function lvFsExit(e){
+  if(!e || !e.lvFrame.classList.contains('fs')) return;
+  e.lvFrame.classList.remove('fs');
+  for(const [node, parent, before] of (e.lvHome || [])) parent.insertBefore(node, before);
+  e.lvHome = null;
+  document.body.classList.remove('lv-fs-on');
+  if(lvFsCurrent === e) lvFsCurrent = null;
+  e.lvApKey = null;                            // вернуться к размеру по карточке
+  lvApplyRotation(e);
+}
+
+// Escape ловим в фазе ПЕРЕХВАТА и гасим дальше: иначе тот же Escape закроет
+// заодно и окно настроек, если оно открыто под полноэкранным кадром.
+document.addEventListener('keydown', ev => {
+  if(ev.key === 'Escape' && lvFsCurrent){ ev.stopPropagation(); lvFsExit(lvFsCurrent); }
+}, true);
 function lvDraw(e){
   const frames = e.lvFrames || [];
   let s='';
@@ -725,13 +815,14 @@ function lvStart(e){
   loop();
 }
 function lvStop(e){
+  lvFsExit(e);                  // закрыли раздел — полноэкранному режиму неоткуда брать кадры
   e.lvOn=false;
   if(e.lvTimer){ clearTimeout(e.lvTimer); e.lvTimer=null; }
   if(e.lvUrl){ URL.revokeObjectURL(e.lvUrl); e.lvUrl=null; }
   e.lvImg.removeAttribute('src');
   e.lvFrame.classList.remove('has-img');
   e.lvFrame.style.height='';   // вернуть плейсхолдер 16:9
-  e.lvApW=0;                    // пересчитать размер при повторном открытии
+  e.lvApKey=null;               // пересчитать размер при повторном открытии
   e.lvFrames=[];
   e.lvOv.innerHTML='';
 }
@@ -796,6 +887,13 @@ function buildCard(cam){
             <svg class="lv-ov" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>
           </div>
           <div class="lv-ph">Нет сигнала</div>
+          <button class="lv-fs" title="На весь экран"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M16 21h5v-5"/><path d="M8 21H3v-5"/></svg></button>
+          <!-- Панель полноэкранного режима. Кнопка поворота и галочки рамок сюда
+               ПЕРЕЕЗЖАЮТ из карточки, а не дублируются: две копии одних и тех же
+               переключателей неизбежно разошлись бы состоянием. -->
+          <div class="lv-bar">
+            <button class="lv-fs-exit" title="Выйти из полноэкранного режима (Esc)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h5V3"/><path d="M21 8h-5V3"/><path d="M21 16h-5v5"/><path d="M3 16h5v5"/></svg></button>
+          </div>
         </div>
         <div class="lv-toggles">
           <label class="lv-fr"><input type="checkbox" class="lv-cb-eye" checked>Рамка глаза</label>
@@ -836,6 +934,11 @@ function buildCard(cam){
     lvCbEye:  card.querySelector('.lv-cb-eye'),
     lvCbZone: card.querySelector('.lv-cb-zone'),
     lvRotBtn: card.querySelector('.lv-rot'),
+    lvSection: card.querySelector('.lv'),
+    lvToggles: card.querySelector('.lv-toggles'),
+    lvFsBtn:  card.querySelector('.lv-fs'),
+    lvBar:    card.querySelector('.lv-bar'),
+    lvExitBtn:card.querySelector('.lv-fs-exit'),
     lvRot:    0,
   };
   // обработчики
@@ -864,6 +967,8 @@ function buildCard(cam){
   e.lvCbEye.onchange  = ()=>lvDraw(e);   // перерисовать сразу при переключении
   e.lvCbZone.onchange = ()=>lvDraw(e);
   e.lvRotBtn.onclick  = (ev)=>{ ev.stopPropagation(); e.lvRot=(e.lvRot+90)%360; lvApplyRotation(e); };
+  e.lvFsBtn.onclick   = (ev)=>{ ev.stopPropagation(); lvFsEnter(e); };
+  e.lvExitBtn.onclick = (ev)=>{ ev.stopPropagation(); lvFsExit(e); };
   // ---- группы: карточку можно перетащить; селектор — запасной путь для тача ----
   e.ip = cam.ip || '';
   card.draggable = true;
@@ -1275,7 +1380,14 @@ function sync(onlineCams){
   });
   // убрать карточки камер, которых больше нет онлайн
   for(const id in cards){
-    if(!seen.has(id)){ cards[id].card.remove(); delete cards[id]; }
+    if(!seen.has(id)){
+      // Сначала свернуть полноэкранный кадр: на время режима он живёт в <body>,
+      // и удаление карточки оставило бы его висеть на экране без источника.
+      lvFsExit(cards[id]);
+      lvStop(cards[id]);
+      cards[id].card.remove();
+      delete cards[id];
+    }
   }
   placeCards();                       // разложить карточки по группам
   const count = Object.keys(cards).length;
