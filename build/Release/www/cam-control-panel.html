@@ -91,7 +91,13 @@
   .share-url:hover{text-decoration:underline;}
   .share-qr{flex:none; width:120px; height:120px; border-radius:6px; overflow:hidden; background:#fff; cursor:zoom-in;}
   .share-qr svg{display:block; width:100%; height:100%;}
-  .qr-modal{position:fixed; inset:0; z-index:60; display:none; align-items:center; justify-content:center;
+  /* 🔴 ПОРЯДОК СЛОЁВ (все они — соседи на уровне body, поэтому решает только z-index):
+        100  тост-уведомление — видно всегда
+         90  QR во весь экран — ОТКРЫВАЕТСЯ ИЗ окна настроек, значит обязан быть выше него
+         80  окно настроек
+         70  экран «SignalBox выключен»
+     Новый полноэкранный слой добавлять сюда же, а не подбирать число на глаз. */
+  .qr-modal{position:fixed; inset:0; z-index:90; display:none; align-items:center; justify-content:center;
             background:rgba(0,0,0,.74); padding:20px; -webkit-tap-highlight-color:transparent;}
   .qr-modal.show{display:flex;}
   .qr-modal-card{background:#fff; border-radius:16px; padding:22px 22px 16px; display:flex; flex-direction:column;
