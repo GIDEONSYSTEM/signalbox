@@ -227,7 +227,7 @@ static bool iequalsAscii(const char* a, const char* b) {
     return *a == *b;
 }
 
-static const char*    kAppVersion = "1.0.7";
+static const char*    kAppVersion = "1.0.8";
 // ЗАПОЛНИТЬ после создания репозитория, формат "владелец/репозиторий".
 // Пустая строка = проверка обновлений выключена.
 static const char*    kUpdateRepo = "GIDEONSYSTEM/signalbox";
