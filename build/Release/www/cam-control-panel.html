@@ -447,6 +447,28 @@
   .ipbox summary::-webkit-details-marker{display:none;}
   .ipbox summary .arw{transition:transform .15s;}
   .ipbox[open] summary .arw{transform:rotate(90deg);}
+  /* ---- раздел «Горячие клавиши» ---- */
+  .keys-warn{font-size:11px; line-height:1.5; color:var(--warn); margin-bottom:12px;
+             border:1px solid rgba(255,194,75,.28); background:rgba(255,194,75,.07);
+             border-radius:9px; padding:8px 10px;}
+  .keys-row{display:flex; align-items:center; gap:9px; padding:8px 0;
+            border-top:1px solid var(--edge-2);}
+  .keys-row:first-child{border-top:none;}
+  .keys-name{flex:1 1 auto; min-width:0; font-weight:600; overflow:hidden; text-overflow:ellipsis;
+             white-space:nowrap;}
+  .keys-cams{flex:none; font-family:var(--cond); font-size:10px; letter-spacing:.06em; color:var(--idle);}
+  .keys-bind{flex:none; display:flex; align-items:center; gap:6px;}
+  .keys-btn{font-family:var(--mono); font-size:11px; padding:5px 9px; border-radius:7px;
+            border:1px solid var(--edge); background:#1c222b; color:var(--ink); cursor:pointer;
+            min-width:104px; text-align:center;}
+  .keys-btn:hover{border-color:rgba(255,255,255,.28);}
+  .keys-btn.set{color:var(--ok); border-color:rgba(65,214,126,.45);}
+  .keys-btn.wait{color:var(--warn); border-color:rgba(255,194,75,.5); animation:pulse 1.1s infinite;}
+  .keys-clear{flex:none; background:none; border:none; color:var(--idle); cursor:pointer;
+              font-size:15px; line-height:1; padding:2px 4px;}
+  .keys-clear:hover{color:var(--crit);}
+  .keys-empty{font-size:12px; color:var(--idle); padding:6px 0;}
+
   .ip-hint{font-size:11px; line-height:1.5; color:var(--idle); margin:9px 0 8px;}
   .ip-form{display:flex; flex-wrap:wrap; gap:6px; align-items:center;}
   .ip-form input[type=text]{flex:1 1 130px; min-width:0; background:var(--panel-2); color:var(--ink);
@@ -520,6 +542,7 @@
     <div class="set-side">
       <div class="set-title">Настройки</div>
       <button class="set-nav on" data-pane="cams">Камеры</button>
+      <button class="set-nav"    data-pane="keys">Горячие клавиши</button>
       <button class="set-nav"    data-pane="access">Доступ</button>
       <button class="set-nav"    data-pane="update">Обновление</button>
     </div>
@@ -544,6 +567,21 @@
           </div>
           <div class="ip-list" id="ipList"></div>
         </div>
+      </section>
+
+      <section class="set-pane" data-pane="keys">
+        <div class="set-h">Горячие клавиши на запись группы</div>
+        <div class="set-note">
+          Клавиша и MIDI-кнопка работают всегда, даже когда панель закрыта: они
+          перехватываются самой программой. Нажатие — тумблер: первое запускает
+          запись на всех камерах группы, следующее останавливает.
+        </div>
+        <div class="keys-warn">
+          Пока SignalBox запущен, назначенная комбинация занята и до других
+          программ не доходит. Берите сочетания с Ctrl/Alt/Shift или клавиши
+          F13–F24, которые больше нигде не используются.
+        </div>
+        <div id="keysList"></div>
       </section>
 
       <section class="set-pane" data-pane="access">
@@ -1203,7 +1241,12 @@ async function loadGroups(){
     const d = await r.json();
     groups = (Array.isArray(d.groups) ? d.groups : []).filter(g => g && g.id).map(g => ({
       id: String(g.id), name: String(g.name || 'Зал'),
-      cams: Array.isArray(g.cams) ? g.cams.map(String) : []
+      cams: Array.isArray(g.cams) ? g.cams.map(String) : [],
+      // ⚠️ Привязки обязательно переносить: saveGroups отправляет массив целиком,
+      // и потерянное здесь поле стёрлось бы при первом же сохранении групп.
+      hotkey: typeof g.hotkey === 'string' ? g.hotkey : '',
+      midi: (g.midi && typeof g.midi.status === 'number' && typeof g.midi.d1 === 'number')
+              ? {status: g.midi.status, d1: g.midi.d1} : null
     }));
   }catch(_){ groups = []; }
   renderGroups(); placeCards();
@@ -1219,8 +1262,123 @@ function saveGroups(){
 }
 
 function addGroup(){
-  groups.push({id:newGid(), name:'Зал ' + (groups.length + 1), cams:[]});
+  groups.push({id:newGid(), name:'Зал ' + (groups.length + 1), cams:[], hotkey:'', midi:null});
   saveGroups(); renderGroups(); placeCards();
+}
+
+/* ---------- горячие клавиши и MIDI на запись группы ----------
+   Список строится из ТОГО ЖЕ массива groups, что и залы на главном экране,
+   поэтому имя группы всегда совпадает: переименовали зал — строка здесь
+   переименовалась сама. Привязки лежат рядом с группой в groups.json, потому что
+   их читает сервер: MIDI приходит в C++, и системные клавиши регистрируются там же. */
+const MIDI_KINDS = {0x80:'нота off', 0x90:'нота', 0xB0:'CC', 0xC0:'программа'};
+function midiLabel(m){
+  const kind = MIDI_KINDS[m.status & 0xF0] || ('0x' + (m.status & 0xF0).toString(16));
+  return `${kind} #${m.d1} · к${(m.status & 0x0F) + 1}`;
+}
+
+// event.code -> каноническое имя, которое понимает платформенный слой.
+// Раскладка не важна: code — это физическая клавиша.
+function keyNameFromEvent(ev){
+  const c = ev.code || '';
+  if(/^Key[A-Z]$/.test(c))    return c.slice(3);
+  if(/^Digit[0-9]$/.test(c))  return c.slice(5);
+  if(/^F([1-9]|1[0-9]|2[0-4])$/.test(c)) return c;
+  if(/^Numpad[0-9]$/.test(c)) return c;
+  const named = {Space:'Space', Enter:'Enter', NumpadEnter:'Enter', Tab:'Tab',
+                 ArrowLeft:'Left', ArrowRight:'Right', ArrowUp:'Up', ArrowDown:'Down',
+                 Insert:'Insert', Delete:'Delete', Home:'Home', End:'End',
+                 PageUp:'PageUp', PageDown:'PageDown', Backspace:'Backspace'};
+  return named[c] || '';
+}
+
+let keyCapture = null;        // {gid, btn} — идёт ожидание нажатия
+let midiCapture = null;       // {gid, btn, seq0, timer, until}
+
+function stopCapture(){
+  if(keyCapture){ keyCapture.btn.classList.remove('wait'); keyCapture = null; }
+  if(midiCapture){
+    clearInterval(midiCapture.timer);
+    midiCapture.btn.classList.remove('wait');
+    midiCapture = null;
+  }
+  renderKeys();
+}
+
+function beginKeyCapture(g, btn){
+  stopCapture();
+  keyCapture = {gid: g.id, btn};
+  btn.classList.add('wait');
+  btn.textContent = 'Нажми клавишу…';
+}
+
+function beginMidiCapture(g, btn){
+  stopCapture();
+  btn.classList.add('wait');
+  btn.textContent = 'Нажми на пульте…';
+  fetch(`${LV_BASE}/midi/last`,{cache:'no-store'}).then(r=>r.json()).then(d0=>{
+    const until = Date.now() + 15000;
+    const timer = setInterval(async ()=>{
+      if(Date.now() > until){ showToast('MIDI-кнопка не нажата'); stopCapture(); return; }
+      try{
+        const d = await (await fetch(`${LV_BASE}/midi/last`,{cache:'no-store'})).json();
+        if(d.seq !== d0.seq){                       // пришло НОВОЕ сообщение — это и есть кнопка
+          g.midi = {status: d.status, d1: d.d1};
+          saveGroups(); stopCapture();
+          showToast('MIDI назначен: ' + midiLabel(g.midi));
+        }
+      }catch(_){ }
+    }, 200);
+    midiCapture = {gid: g.id, btn, seq0: d0.seq, timer, until};
+  }).catch(()=>{ showToast('Сборщик не отвечает'); stopCapture(); });
+}
+
+// Перехват нажатия идёт в capture-фазе и гасится: пока ждём клавишу, она не
+// должна попасть ни в поля ввода, ни в другие обработчики панели.
+document.addEventListener('keydown', ev => {
+  if(!keyCapture) return;
+  ev.preventDefault(); ev.stopPropagation();
+  if(ev.key === 'Escape'){ stopCapture(); return; }
+  const name = keyNameFromEvent(ev);
+  if(!name) return;                                  // чистый модификатор — ждём дальше
+  const parts = [];
+  if(ev.ctrlKey)  parts.push('Ctrl');
+  if(ev.altKey)   parts.push('Alt');
+  if(ev.shiftKey) parts.push('Shift');
+  if(ev.metaKey)  parts.push('Win');
+  parts.push(name);
+  const g = groups.find(x => x.id === keyCapture.gid);
+  if(g){ g.hotkey = parts.join('+'); saveGroups(); showToast('Клавиша назначена: ' + g.hotkey); }
+  stopCapture();
+}, true);
+
+function renderKeys(){
+  const box = document.getElementById('keysList');
+  if(!box) return;
+  if(!groups.length){
+    box.innerHTML = '<div class="keys-empty">Групп пока нет. Создайте зал на главном экране — он появится здесь.</div>';
+    return;
+  }
+  box.innerHTML = groups.map(g => `
+    <div class="keys-row" data-gid="${hesc(g.id)}">
+      <span class="keys-name">${hesc(g.name)}</span>
+      <span class="keys-cams">${g.cams.length} кам.</span>
+      <div class="keys-bind">
+        <button class="keys-btn k-key${g.hotkey ? ' set' : ''}" title="Назначить клавишу">${hesc(g.hotkey || 'Клавиша')}</button>
+        <button class="keys-btn k-midi${g.midi ? ' set' : ''}" title="Назначить кнопку на MIDI-пульте">${g.midi ? hesc(midiLabel(g.midi)) : 'MIDI'}</button>
+        <button class="keys-clear" title="Убрать обе привязки">✕</button>
+      </div>
+    </div>`).join('');
+
+  box.querySelectorAll('.keys-row').forEach(row => {
+    const g = groups.find(x => x.id === row.dataset.gid);
+    if(!g) return;
+    row.querySelector('.k-key').onclick  = (ev)=>beginKeyCapture(g, ev.currentTarget);
+    row.querySelector('.k-midi').onclick = (ev)=>beginMidiCapture(g, ev.currentTarget);
+    row.querySelector('.keys-clear').onclick = ()=>{
+      g.hotkey = ''; g.midi = null; saveGroups(); renderKeys();
+    };
+  });
 }
 function removeGroup(id){          // камеры не теряются — уезжают в «Без группы»
   groups = groups.filter(g => g.id !== id);
@@ -1354,6 +1512,9 @@ function renderGroups(){
     wireDropZone(el.querySelector('.grp-body'));
     groupsWrap.appendChild(el);
   });
+  // Список горячих клавиш строится из того же массива, поэтому обновляем его
+  // здесь: переименовали или удалили зал — раздел настроек совпадает сразу.
+  renderKeys();
 }
 
 function placeCards(){

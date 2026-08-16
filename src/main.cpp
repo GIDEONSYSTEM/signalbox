@@ -1145,6 +1145,169 @@ static bool writeGroupsJson(const std::string& json) {
     return plat::writeFile(groupsPath(), json);
 }
 
+// определены ниже по файлу — нужны здесь, в разборе групп и в HTTP-обработчике
+static bool jsonGetStringArray(const std::string&, const std::string&, std::vector<std::string>&);
+static std::vector<CameraSession*> resolveTargetsByIp(const std::vector<std::string>&);
+static std::string midiLastJson();
+
+// ---------------- привязки: горячая клавиша и MIDI-кнопка на группу ----------------
+// 🔴 Схемой groups.json по-прежнему владеет ПАНЕЛЬ, но с 2026-08-13 сервер её ещё
+// и ЧИТАЕТ: MIDI приходит в C++, а системные горячие клавиши регистрируются в
+// нём же — значит состав групп и привязки должны быть известны здесь.
+// Поля группы: {"id","name","cams":[ip],"hotkey":"Ctrl+Alt+1","midi":{"status":176,"d1":17}}
+// Отсутствующие поля — просто нет привязки, это нормальное состояние.
+struct GroupBinding {
+    std::string              id, name;
+    std::vector<std::string> cams;
+    std::string              hotkey;          // пусто = клавиша не назначена
+    int                      midiStatus = -1; // -1 = MIDI не назначен
+    int                      midiD1     = -1;
+};
+
+static std::mutex                 g_bindMutex;
+static std::vector<GroupBinding>  g_bindings;     // под g_bindMutex
+
+// Границы объекта группы в массиве. Полноценный JSON-парсер ради двух полей не
+// тащим, но и наивный поиск по всей строке не годится: имена групп задаёт
+// человек, и «cams» вполне может встретиться в названии зала.
+static bool nextGroupObject(const std::string& s, size_t from, size_t& begin, size_t& end) {
+    const size_t b = s.find('{', from);
+    if (b == std::string::npos) return false;
+    int depth = 0;
+    bool inStr = false, esc = false;
+    for (size_t i = b; i < s.size(); ++i) {
+        const char c = s[i];
+        if (esc) { esc = false; continue; }
+        if (inStr) { if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
+        if (c == '"') { inStr = true; continue; }
+        if (c == '{') ++depth;
+        else if (c == '}') { if (--depth == 0) { begin = b; end = i + 1; return true; } }
+    }
+    return false;
+}
+
+static void reloadBindings() {
+    const std::string js = readGroupsJson();
+    std::vector<GroupBinding> out;
+
+    size_t pos = js.find("\"groups\"");
+    if (pos != std::string::npos) {
+        size_t b = 0, e = 0, from = pos;
+        while (nextGroupObject(js, from, b, e)) {
+            const std::string obj = js.substr(b, e - b);
+            from = e;
+            GroupBinding g;
+            jsonGet(obj, "id", g.id);
+            jsonGet(obj, "name", g.name);
+            jsonGetStringArray(obj, "cams", g.cams);
+            jsonGet(obj, "hotkey", g.hotkey);
+            std::string st, d1;
+            if (jsonGet(obj, "status", st) && jsonGet(obj, "d1", d1)) {   // объект midi внутри группы
+                g.midiStatus = std::atoi(st.c_str());
+                g.midiD1     = std::atoi(d1.c_str());
+            }
+            if (!g.id.empty()) out.push_back(g);
+        }
+    }
+    { std::lock_guard<std::mutex> lk(g_bindMutex); g_bindings = out; }
+}
+
+// Тумблер записи на группе — то же правило, что у toggleRecAll: пишет хоть одна
+// камера группы, значит нажатие останавливает; иначе запускает. Так одна кнопка
+// работает и на старт, и на стоп, и не расходится с поведением MIDI CC#17.
+static void toggleRecGroup(const GroupBinding& g, const char* src) {
+    auto targets = resolveTargetsByIp(g.cams);
+    if (targets.empty()) {
+        consolePrintf("[%s] Группа «%s»: подключённых камер нет.\n", src, g.name.c_str());
+        return;
+    }
+    bool anyRec = false;
+    for (CameraSession* c : targets)
+        if (c->isConnected() && c->cachedRecording()) { anyRec = true; break; }
+    const bool start = !anyRec;
+    int ok = 0;
+    for (CameraSession* c : targets) if (c->setRec(start)) ++ok;
+    consolePrintf("[%s] Группа «%s»: %s записи, отправлено %d из %zu.\n",
+                  src, g.name.c_str(), start ? "старт" : "стоп", ok, targets.size());
+}
+
+// "Ctrl+Alt+F5" -> модификаторы + каноническое имя клавиши. Формат задаёт панель,
+// она же его и показывает человеку, поэтому разбор простой и симметричный.
+static bool parseHotkey(const std::string& s, plat::HotKey& out) {
+    out = plat::HotKey{};
+    size_t start = 0;
+    while (start < s.size()) {
+        size_t plus = s.find('+', start);
+        std::string part = (plus == std::string::npos) ? s.substr(start) : s.substr(start, plus - start);
+        while (!part.empty() && part.back() == ' ')  part.pop_back();
+        while (!part.empty() && part.front() == ' ') part.erase(0, 1);
+        if      (part == "Ctrl")  out.ctrl  = true;
+        else if (part == "Alt")   out.alt   = true;
+        else if (part == "Shift") out.shift = true;
+        else if (part == "Win" || part == "Cmd" || part == "Meta") out.meta = true;
+        else if (!part.empty())   out.key   = part;      // последняя часть — сама клавиша
+        if (plus == std::string::npos) break;
+        start = plus + 1;
+    }
+    return !out.key.empty();
+}
+
+// Перерегистрировать системные клавиши по текущим привязкам. Набор заменяется
+// целиком: проще и надёжнее, чем следить, что именно поменялось.
+// id клавиши = индекс группы в g_bindings, по нему же и находим её при нажатии.
+static void applyHotkeys() {
+    if (!plat::hotkeysSupported()) return;
+    std::vector<std::pair<int, plat::HotKey>> keys;
+    std::vector<std::string> names;
+    {
+        std::lock_guard<std::mutex> lk(g_bindMutex);
+        for (size_t i = 0; i < g_bindings.size(); ++i) {
+            if (g_bindings[i].hotkey.empty()) continue;
+            plat::HotKey hk;
+            if (!parseHotkey(g_bindings[i].hotkey, hk)) continue;
+            keys.push_back({ static_cast<int>(i), hk });
+            names.push_back(g_bindings[i].name + " (" + g_bindings[i].hotkey + ")");
+        }
+    }
+    const std::vector<int> failed = plat::hotkeysApply(keys);
+    for (size_t k = 0; k < keys.size(); ++k) {
+        const bool bad = std::find(failed.begin(), failed.end(), keys[k].first) != failed.end();
+        consolePrintf("[hotkey] %s — %s\n", names[k].c_str(),
+                      bad ? "НЕ УДАЛОСЬ занять: комбинацию уже держит другая программа"
+                          : "зарегистрирована");
+    }
+}
+
+// Перечитать группы и переназначить клавиши. Зовётся при старте и после каждого
+// сохранения групп из панели.
+static void reloadBindingsAndHotkeys() {
+    reloadBindings();
+    applyHotkeys();
+}
+
+static void onHotkeyPressed(int id) {
+    GroupBinding g;
+    {
+        std::lock_guard<std::mutex> lk(g_bindMutex);
+        if (id < 0 || static_cast<size_t>(id) >= g_bindings.size()) return;
+        g = g_bindings[id];
+    }
+    toggleRecGroup(g, "hotkey");
+}
+
+// Совпало ли входящее MIDI-сообщение с привязкой группы. Сравниваем статус и
+// номер контроллера/ноты, но НЕ значение: у кнопки нажатие и отпускание
+// отличаются именно значением, и реагировать надо только на нажатие.
+static bool midiMatchesGroup(unsigned status, unsigned d1, GroupBinding& out) {
+    std::lock_guard<std::mutex> lk(g_bindMutex);
+    for (const GroupBinding& g : g_bindings) {
+        if (g.midiStatus < 0 || g.midiD1 < 0) continue;
+        if (static_cast<unsigned>(g.midiStatus) == status &&
+            static_cast<unsigned>(g.midiD1) == d1) { out = g; return true; }
+    }
+    return false;
+}
+
 // Enumerate the network and add any camera not already tracked. Safe to call
 // repeatedly; cameras in a studio come online at different times.
 static void discoverOnce(bool announce) {
@@ -1366,6 +1529,12 @@ static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std:
         rr.body = "{\"ok\":true,\"auto\":" + std::string(g_autoUpdate.load() ? "true" : "false") + "}";
         return rr;
     }
+    if (req.method == "GET" && req.path == "/midi/last") {
+        // Панель опрашивает это в режиме обучения: жди нажатия на пульте.
+        r.contentType = "application/json; charset=utf-8";
+        r.body = midiLastJson();
+        return r;
+    }
     if (req.method == "GET" && req.path == "/groups.json") {
         r.contentType = "application/json; charset=utf-8";
         r.body = readGroupsJson();
@@ -1390,6 +1559,8 @@ static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std:
             rr.body = "{\"ok\":false,\"error\":\"не удалось записать groups.json\"}";
             return rr;
         }
+        // Состав групп и привязки изменились — перечитать и переназначить клавиши.
+        reloadBindingsAndHotkeys();
         rr.body = "{\"ok\":true}";
         return rr;
     }
@@ -1546,17 +1717,42 @@ static void midiWorker() {
         // on press and 0 on release, so trigger ONLY on press (d2 != 0) and ignore
         // the release — a hold of any length is exactly one toggle, the next toggle
         // needs a fresh full press. Small debounce guards against contact bounce.
-        if (status == 0xB0 && d1 == 17 && d2 != 0) {
-            auto now = clk::now();
-            if (now - lastTrig >= 80ms) { lastTrig = now; toggleRecAll("midi"); }
-        }
+        if (d2 == 0) continue;                       // отпускание кнопки — не событие
+        auto now = clk::now();
+        if (now - lastTrig < 80ms) continue;         // дребезг контакта
+
+        // Сначала привязки групп: они назначены человеком осознанно и должны
+        // побеждать общий тумблер, даже если кто-то назначит на группу CC #17.
+        GroupBinding g;
+        if (midiMatchesGroup(status, d1, g)) { lastTrig = now; toggleRecGroup(g, "midi"); continue; }
+
+        if (status == 0xB0 && d1 == 17) { lastTrig = now; toggleRecAll("midi"); }
     }
 }
 
 // Драйвер зовёт нас из системного потока — там делаем минимум (кладём в очередь),
 // всю работу берёт midiWorker: вызовы SDK в этом колбэке недопустимы.
+// Последнее полученное сообщение — панель по нему «учит» кнопку: человек жмёт
+// на пульте, панель забирает отсюда статус и номер. seq растёт при каждом новом
+// сообщении, иначе клиент не отличит повторное нажатие той же кнопки.
+static std::mutex g_midiLastMx;
+static unsigned   g_midiLastStatus = 0, g_midiLastD1 = 0, g_midiLastD2 = 0;
+static long long  g_midiLastSeq    = 0;
+
+static std::string midiLastJson() {
+    std::lock_guard<std::mutex> lk(g_midiLastMx);
+    return "{\"status\":" + std::to_string(g_midiLastStatus) +
+           ",\"d1\":" + std::to_string(g_midiLastD1) +
+           ",\"d2\":" + std::to_string(g_midiLastD2) +
+           ",\"seq\":" + std::to_string(g_midiLastSeq) + "}";
+}
+
 static void startMidi() {
     const bool ok = plat::midiStart([](unsigned status, unsigned d1, unsigned d2) {
+        if (d2 != 0) {                       // запоминаем только нажатия, не отпускания
+            std::lock_guard<std::mutex> lk(g_midiLastMx);
+            g_midiLastStatus = status; g_midiLastD1 = d1; g_midiLastD2 = d2; ++g_midiLastSeq;
+        }
         { std::lock_guard<std::mutex> lk(g_midiMx);
           g_midiQ.push_back(status | (d1 << 8) | (d2 << 16)); }
         g_midiCv.notify_one();
@@ -1761,6 +1957,10 @@ int main() {
     // cameras, globally (independent of window focus). Replaces the keyboard hotkey.
     startMidi();
     std::thread midiThr(midiWorker);
+    // Привязки групп: MIDI-кнопки и системные горячие клавиши. Клавиши
+    // регистрируются в потоке цикла событий — он поднимется ниже и подхватит их.
+    plat::onHotkey(onHotkeyPressed);
+    reloadBindingsAndHotkeys();
     std::thread lvThr(liveViewWorker);   // live view: pulls frames only for open previews
 
     consolePrintf("Сервер запущен. Пульт (Custom Browser Dock в OBS):\n");

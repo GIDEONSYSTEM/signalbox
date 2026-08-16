@@ -19,6 +19,7 @@
 #include "Platform.h"
 
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>          // RegisterEventHotKey: системные горячие клавиши без разрешений
 #import <Foundation/Foundation.h>
 #include <CoreMIDI/CoreMIDI.h>
 
@@ -705,6 +706,109 @@ void runEventLoop(const TrayActions& actions, const std::function<bool()>& keepR
 
     removeTrayIcon();
 }
+
+// ---------------- системные горячие клавиши ----------------
+// Carbon RegisterEventHotKey, а НЕ CGEventTap: тап читает весь ввод в системе и
+// требует разрешения «Мониторинг ввода», а регистрация конкретной комбинации
+// работает без разрешений вовсе. API старый, но поддерживается и на arm64.
+namespace {
+
+std::function<void(int)> g_hotkeyCb;
+std::vector<EventHotKeyRef> g_hotkeyRefs;
+EventHandlerRef g_hotkeyHandler = nullptr;
+
+// Каноническое имя -> виртуальный код macOS. Коды другие, чем на Windows,
+// но ИМЕНА общие: они хранятся в groups.json и должны означать одно и то же.
+UInt32 keyCodeFromName(const std::string& n) {
+    if (n.size() == 1) {
+        static const std::string letters = "asdfhgzxcv bqweryt123465=97-80]ou[ip lj'k;\\,/nm.";
+        // раскладка кодов у Carbon нелинейная, поэтому таблица явная
+        static const std::pair<char, UInt32> kChars[] = {
+            {'A',kVK_ANSI_A},{'B',kVK_ANSI_B},{'C',kVK_ANSI_C},{'D',kVK_ANSI_D},{'E',kVK_ANSI_E},
+            {'F',kVK_ANSI_F},{'G',kVK_ANSI_G},{'H',kVK_ANSI_H},{'I',kVK_ANSI_I},{'J',kVK_ANSI_J},
+            {'K',kVK_ANSI_K},{'L',kVK_ANSI_L},{'M',kVK_ANSI_M},{'N',kVK_ANSI_N},{'O',kVK_ANSI_O},
+            {'P',kVK_ANSI_P},{'Q',kVK_ANSI_Q},{'R',kVK_ANSI_R},{'S',kVK_ANSI_S},{'T',kVK_ANSI_T},
+            {'U',kVK_ANSI_U},{'V',kVK_ANSI_V},{'W',kVK_ANSI_W},{'X',kVK_ANSI_X},{'Y',kVK_ANSI_Y},
+            {'Z',kVK_ANSI_Z},
+            {'0',kVK_ANSI_0},{'1',kVK_ANSI_1},{'2',kVK_ANSI_2},{'3',kVK_ANSI_3},{'4',kVK_ANSI_4},
+            {'5',kVK_ANSI_5},{'6',kVK_ANSI_6},{'7',kVK_ANSI_7},{'8',kVK_ANSI_8},{'9',kVK_ANSI_9},
+        };
+        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(n[0])));
+        for (const auto& kv : kChars) if (kv.first == c) return kv.second;
+        (void)letters;
+        return 0xFFFF;
+    }
+    if ((n[0] == 'F' || n[0] == 'f') && n.size() >= 2) {
+        static const UInt32 kF[] = {kVK_F1,kVK_F2,kVK_F3,kVK_F4,kVK_F5,kVK_F6,kVK_F7,kVK_F8,
+                                    kVK_F9,kVK_F10,kVK_F11,kVK_F12,kVK_F13,kVK_F14,kVK_F15,
+                                    kVK_F16,kVK_F17,kVK_F18,kVK_F19,kVK_F20};
+        const int num = std::atoi(n.c_str() + 1);
+        if (num >= 1 && num <= 20) return kF[num - 1];
+    }
+    if (n.rfind("Numpad", 0) == 0 && n.size() == 7) {
+        static const UInt32 kNum[] = {kVK_ANSI_Keypad0,kVK_ANSI_Keypad1,kVK_ANSI_Keypad2,
+                                      kVK_ANSI_Keypad3,kVK_ANSI_Keypad4,kVK_ANSI_Keypad5,
+                                      kVK_ANSI_Keypad6,kVK_ANSI_Keypad7,kVK_ANSI_Keypad8,
+                                      kVK_ANSI_Keypad9};
+        const unsigned char d = static_cast<unsigned char>(n[6]);
+        if (d >= '0' && d <= '9') return kNum[d - '0'];
+    }
+    static const std::pair<const char*, UInt32> kNamed[] = {
+        {"Space", kVK_Space}, {"Enter", kVK_Return}, {"Tab", kVK_Tab},
+        {"Left", kVK_LeftArrow}, {"Right", kVK_RightArrow}, {"Up", kVK_UpArrow}, {"Down", kVK_DownArrow},
+        {"Insert", kVK_Help}, {"Delete", kVK_ForwardDelete}, {"Home", kVK_Home}, {"End", kVK_End},
+        {"PageUp", kVK_PageUp}, {"PageDown", kVK_PageDown}, {"Backspace", kVK_Delete},
+    };
+    for (const auto& kv : kNamed) if (n == kv.first) return kv.second;
+    return 0xFFFF;
+}
+
+OSStatus hotkeyEvent(EventHandlerCallRef, EventRef ev, void*) {
+    EventHotKeyID id{};
+    if (GetEventParameter(ev, kEventParamDirectObject, typeEventHotKeyID, nullptr,
+                          sizeof(id), nullptr, &id) == noErr && g_hotkeyCb)
+        g_hotkeyCb(static_cast<int>(id.id));
+    return noErr;
+}
+
+} // namespace
+
+bool hotkeysSupported() { return true; }
+
+void onHotkey(std::function<void(int)> handler) { g_hotkeyCb = std::move(handler); }
+
+std::vector<int> hotkeysApply(const std::vector<std::pair<int, HotKey>>& keys) {
+    std::vector<int> failed;
+
+    for (EventHotKeyRef r : g_hotkeyRefs) UnregisterEventHotKey(r);
+    g_hotkeyRefs.clear();
+
+    if (!g_hotkeyHandler && !keys.empty()) {
+        EventTypeSpec spec{ kEventClassKeyboard, kEventHotKeyPressed };
+        InstallApplicationEventHandler(&hotkeyEvent, 1, &spec, nullptr, &g_hotkeyHandler);
+    }
+
+    for (const auto& kv : keys) {
+        const UInt32 code = keyCodeFromName(kv.second.key);
+        if (code == 0xFFFF) { failed.push_back(kv.first); continue; }
+        UInt32 mods = 0;
+        if (kv.second.ctrl)  mods |= controlKey;
+        if (kv.second.alt)   mods |= optionKey;
+        if (kv.second.shift) mods |= shiftKey;
+        if (kv.second.meta)  mods |= cmdKey;
+        EventHotKeyID hid{};
+        hid.signature = 'SgBx';
+        hid.id = static_cast<UInt32>(kv.first);
+        EventHotKeyRef ref = nullptr;
+        if (RegisterEventHotKey(code, mods, hid, GetApplicationEventTarget(), 0, &ref) == noErr && ref)
+            g_hotkeyRefs.push_back(ref);
+        else
+            failed.push_back(kv.first);       // комбинацию занял кто-то другой
+    }
+    return failed;
+}
+
+void hotkeysClear() { hotkeysApply({}); }
 
 // ---------------- MIDI-вход ----------------
 namespace {

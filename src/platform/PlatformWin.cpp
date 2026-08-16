@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstring>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -492,14 +493,75 @@ std::string computerName() {
 namespace {
 
 const UINT WM_TRAYICON      = WM_APP + 1;
+const UINT WM_HOTKEYS_APPLY = WM_APP + 2;      // «применить набор горячих клавиш» (см. hotkeysApply)
 const UINT IDM_TRAY_OPEN    = 1001;
 const UINT IDM_TRAY_RESTART = 1002;
 const UINT IDM_TRAY_QUIT    = 1003;
 
 TrayActions      g_tray;
-HWND             g_trayWnd = nullptr;
+HWND             g_trayWnd = nullptr;          // объявлено ДО горячих клавиш: они шлют ему сообщения
 NOTIFYICONDATAW  g_nid{};
 std::atomic<bool> g_trayAdded{false};
+
+// ---- системные горячие клавиши ----
+std::function<void(int)> g_hotkeyCb;
+std::vector<int>         g_hotkeyIds;          // что сейчас зарегистрировано (поток цикла событий)
+std::vector<std::pair<int, HotKey>> g_hotkeyWanted;   // чего хотим (под g_hotkeyMx)
+std::mutex               g_hotkeyMx;
+
+// Каноническое имя клавиши -> виртуальный код Windows. Имена приходят из панели
+// и хранятся в groups.json как есть, поэтому таблица — часть формата данных:
+// менять имена нельзя, иначе у студий отвалятся уже назначенные клавиши.
+UINT vkFromName(const std::string& n) {
+    if (n.size() == 1) {
+        const unsigned char c = static_cast<unsigned char>(n[0]);
+        if (c >= 'A' && c <= 'Z') return c;
+        if (c >= 'a' && c <= 'z') return static_cast<UINT>(std::toupper(c));
+        if (c >= '0' && c <= '9') return c;
+    }
+    if ((n[0] == 'F' || n[0] == 'f') && n.size() >= 2) {          // F1..F24
+        const int num = std::atoi(n.c_str() + 1);
+        if (num >= 1 && num <= 24) return VK_F1 + (num - 1);
+    }
+    if (n.rfind("Numpad", 0) == 0 && n.size() == 7) {             // Numpad0..Numpad9
+        const unsigned char d = static_cast<unsigned char>(n[6]);
+        if (d >= '0' && d <= '9') return VK_NUMPAD0 + (d - '0');
+    }
+    static const std::pair<const char*, UINT> kNamed[] = {
+        {"Space", VK_SPACE}, {"Enter", VK_RETURN}, {"Tab", VK_TAB},
+        {"Left", VK_LEFT}, {"Right", VK_RIGHT}, {"Up", VK_UP}, {"Down", VK_DOWN},
+        {"Insert", VK_INSERT}, {"Delete", VK_DELETE}, {"Home", VK_HOME}, {"End", VK_END},
+        {"PageUp", VK_PRIOR}, {"PageDown", VK_NEXT}, {"Backspace", VK_BACK},
+    };
+    for (const auto& kv : kNamed) if (n == kv.first) return kv.second;
+    return 0;
+}
+
+// Снять всё зарегистрированное и поставить заново. Вызывается ТОЛЬКО из потока
+// цикла событий: RegisterHotKey привязывает клавишу к очереди сообщений потока.
+void applyHotkeysHere(std::vector<int>* failed) {
+    for (int id : g_hotkeyIds) UnregisterHotKey(g_trayWnd, id);
+    g_hotkeyIds.clear();
+
+    std::vector<std::pair<int, HotKey>> want;
+    { std::lock_guard<std::mutex> lk(g_hotkeyMx); want = g_hotkeyWanted; }
+    if (!g_trayWnd) return;                     // цикл ещё не поднялся — применим при старте
+
+    for (const auto& [id, hk] : want) {
+        const UINT vk = vkFromName(hk.key);
+        if (!vk) { if (failed) failed->push_back(id); continue; }
+        UINT mods = 0;
+        if (hk.ctrl)  mods |= MOD_CONTROL;
+        if (hk.alt)   mods |= MOD_ALT;
+        if (hk.shift) mods |= MOD_SHIFT;
+        if (hk.meta)  mods |= MOD_WIN;
+        // MOD_NOREPEAT обязателен: без него зажатая клавиша сыплет событиями и
+        // тумблер записи будет дёргаться, пока палец на кнопке.
+        mods |= MOD_NOREPEAT;
+        if (RegisterHotKey(g_trayWnd, id, mods, vk)) g_hotkeyIds.push_back(id);
+        else if (failed) failed->push_back(id);   // комбинацию уже занял кто-то другой
+    }
+}
 
 void showTrayMenu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
@@ -516,6 +578,13 @@ void showTrayMenu(HWND hwnd) {
 
 LRESULT CALLBACK trayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_HOTKEY:
+        // wParam — тот самый id, под которым клавишу зарегистрировали.
+        if (g_hotkeyCb) g_hotkeyCb(static_cast<int>(wp));
+        return 0;
+    case WM_HOTKEYS_APPLY:
+        applyHotkeysHere(reinterpret_cast<std::vector<int>*>(lp));
+        return 0;
     case WM_TRAYICON:
         if (LOWORD(lp) == WM_RBUTTONUP)               showTrayMenu(hwnd);
         else if (LOWORD(lp) == WM_LBUTTONDBLCLK && g_tray.onOpenPanel) g_tray.onOpenPanel();
@@ -539,6 +608,24 @@ LRESULT CALLBACK trayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 void removeTrayIcon() {
     if (g_trayAdded.exchange(false)) Shell_NotifyIconW(NIM_DELETE, &g_nid);
 }
+
+bool hotkeysSupported() { return true; }
+
+void onHotkey(std::function<void(int)> handler) { g_hotkeyCb = std::move(handler); }
+
+// Набор заменяется целиком. Зовут из HTTP-потока, а регистрировать обязан поток
+// цикла событий: RegisterHotKey привязывает клавишу к очереди сообщений ПОТОКА.
+// SendMessage выполняет обработчик в том потоке и дожидается конца — поэтому
+// список отказов возвращается честно, а не «когда-нибудь потом».
+std::vector<int> hotkeysApply(const std::vector<std::pair<int, HotKey>>& keys) {
+    { std::lock_guard<std::mutex> lk(g_hotkeyMx); g_hotkeyWanted = keys; }
+    std::vector<int> failed;
+    if (g_trayWnd) SendMessageW(g_trayWnd, WM_HOTKEYS_APPLY, 0,
+                                reinterpret_cast<LPARAM>(&failed));
+    return failed;                      // окна ещё нет — применится при старте цикла
+}
+
+void hotkeysClear() { hotkeysApply({}); }
 
 void runEventLoop(const TrayActions& actions, const std::function<bool()>& keepRunning) {
     g_tray = actions;
@@ -575,6 +662,10 @@ void runEventLoop(const TrayActions& actions, const std::function<bool()>& keepR
             logf("[tray] Не удалось добавить значок (код %lu).\n", GetLastError());
         }
     }
+
+    // Горячие клавиши могли назначить ДО того, как поднялся цикл (они читаются
+    // из groups.json при старте) — регистрируем их здесь, уже в нужном потоке.
+    applyHotkeysHere(nullptr);
 
     // Цикл не блокируется навсегда: раз в ~150 мс просыпаемся и смотрим, не пора
     // ли выходить. Выход инициирует кто угодно — панель, трей, Ctrl+C.
