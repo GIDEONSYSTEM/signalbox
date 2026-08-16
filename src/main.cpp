@@ -1212,9 +1212,9 @@ static void reloadBindings() {
     { std::lock_guard<std::mutex> lk(g_bindMutex); g_bindings = out; }
 }
 
-// Тумблер записи на группе — то же правило, что у toggleRecAll: пишет хоть одна
-// камера группы, значит нажатие останавливает; иначе запускает. Так одна кнопка
-// работает и на старт, и на стоп, и не расходится с поведением MIDI CC#17.
+// Тумблер записи на группе: пишет хоть одна камера группы — нажатие
+// останавливает, иначе запускает. Так одна кнопка работает и на старт, и на
+// стоп, и не нужно занимать на пульте две.
 static void toggleRecGroup(const GroupBinding& g, const char* src) {
     auto targets = resolveTargetsByIp(g.cams);
     if (targets.empty()) {
@@ -1684,22 +1684,11 @@ static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std:
 }
 
 // ---------------- main ----------------
-// ---------------- MIDI (winmm) ----------------
-// Toggle recording on all cameras (shared by any trigger source).
-static void toggleRecAll(const char* src) {
-    auto targets = resolveTargets("all");
-    bool anyRec = false;
-    for (CameraSession* c : targets)
-        if (c->isConnected() && c->cachedRecording()) { anyRec = true; break; }
-    bool start = !anyRec;
-    int ok = 0;
-    for (CameraSession* c : targets) if (c->setRec(start)) ++ok;
-    consolePrintf("[%s] %s записи на всех камерах: отправлено %d из %zu.\n",
-                  src, start ? "Старт" : "Стоп", ok, targets.size());
-}
-
-// Consumes MIDI messages: toggles recording on the mapped key.
-// Mapped key: Control Change, channel 1 (status 0xB0), controller #17.
+// ---------------- MIDI ----------------
+// Разбирает входящие сообщения и переключает запись на группе, за которой
+// закреплена нажатая кнопка. Зашитых привязок больше нет: раньше здесь жил
+// тумблер на CC #17 для ВСЕХ камер, но с появлением привязок к группам (§3)
+// он стал лишним — всё назначается в настройках.
 static void midiWorker() {
     using clk = std::chrono::steady_clock;
     clk::time_point lastTrig{};
@@ -1713,20 +1702,15 @@ static void midiWorker() {
             msg = g_midiQ.front(); g_midiQ.pop_front();
         }
         unsigned status = msg & 0xFF, d1 = (msg >> 8) & 0xFF, d2 = (msg >> 16) & 0xFF;
-        // Mapped key: CC (0xB0) channel 1, controller #17. The button sends value 1
-        // on press and 0 on release, so trigger ONLY on press (d2 != 0) and ignore
-        // the release — a hold of any length is exactly one toggle, the next toggle
-        // needs a fresh full press. Small debounce guards against contact bounce.
+        // Кнопка шлёт значение при нажатии и ноль при отпускании, поэтому
+        // реагируем ТОЛЬКО на нажатие: зажатие любой длины — ровно один тумблер,
+        // следующий требует нового нажатия. Небольшой дебаунс — от дребезга.
         if (d2 == 0) continue;                       // отпускание кнопки — не событие
         auto now = clk::now();
         if (now - lastTrig < 80ms) continue;         // дребезг контакта
 
-        // Сначала привязки групп: они назначены человеком осознанно и должны
-        // побеждать общий тумблер, даже если кто-то назначит на группу CC #17.
         GroupBinding g;
-        if (midiMatchesGroup(status, d1, g)) { lastTrig = now; toggleRecGroup(g, "midi"); continue; }
-
-        if (status == 0xB0 && d1 == 17) { lastTrig = now; toggleRecAll("midi"); }
+        if (midiMatchesGroup(status, d1, g)) { lastTrig = now; toggleRecGroup(g, "midi"); }
     }
 }
 
@@ -1758,7 +1742,8 @@ static void startMidi() {
         g_midiCv.notify_one();
     });
     if (ok)
-        consolePrintf("[midi] Запись переключается MIDI-кнопкой: CC #17, канал 1 (тумблер старт/стоп на всех).\n");
+        consolePrintf("[midi] Пульт подключён. Кнопки назначаются в панели:"
+                      " Настройки -> Горячие клавиши.\n");
 }
 
 // Тянет кадры только для камер с открытым превью (запрос /liveview за последние
