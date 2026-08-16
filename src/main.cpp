@@ -1154,14 +1154,25 @@ static std::string midiLastJson();
 // 🔴 Схемой groups.json по-прежнему владеет ПАНЕЛЬ, но с 2026-08-13 сервер её ещё
 // и ЧИТАЕТ: MIDI приходит в C++, а системные горячие клавиши регистрируются в
 // нём же — значит состав групп и привязки должны быть известны здесь.
-// Поля группы: {"id","name","cams":[ip],"hotkey":"Ctrl+Alt+1","midi":{"status":176,"d1":17}}
-// Отсутствующие поля — просто нет привязки, это нормальное состояние.
+// Поля группы:
+//   {"id","name","cams":[ip],
+//    "binds":[{"action":"rec","key":"Ctrl+Alt+1"},
+//             {"action":"rec","midi":{"status":176,"d1":17}}]}
+//
+// Одна запись в binds — ОДНА привязка, поэтому их можно назначать сколько
+// угодно и удалять по отдельности. Поле action названо явно, чтобы позже
+// появились не только «Запись»: неизвестное действие сервер просто пропускает
+// с сообщением в лог, а не ломается.
+struct Bind {
+    std::string action;                       // сейчас поддерживается только "rec"
+    std::string key;                          // пусто, если привязка MIDI
+    int         midiStatus = -1;              // -1, если привязка клавиатурная
+    int         midiD1     = -1;
+};
 struct GroupBinding {
     std::string              id, name;
     std::vector<std::string> cams;
-    std::string              hotkey;          // пусто = клавиша не назначена
-    int                      midiStatus = -1; // -1 = MIDI не назначен
-    int                      midiD1     = -1;
+    std::vector<Bind>        binds;
 };
 
 static std::mutex                 g_bindMutex;
@@ -1186,6 +1197,26 @@ static bool nextGroupObject(const std::string& s, size_t from, size_t& begin, si
     return false;
 }
 
+// Границы массива по ключу: "binds":[ ... ]. Скобки внутри строк не считаем —
+// иначе символ из названия действия или клавиши оборвал бы разбор.
+static bool arrayBounds(const std::string& s, const std::string& key, size_t& begin, size_t& end) {
+    const size_t k = s.find("\"" + key + "\"");
+    if (k == std::string::npos) return false;
+    const size_t b = s.find('[', k);
+    if (b == std::string::npos) return false;
+    int depth = 0;
+    bool inStr = false, esc = false;
+    for (size_t i = b; i < s.size(); ++i) {
+        const char c = s[i];
+        if (esc) { esc = false; continue; }
+        if (inStr) { if (c == '\\') esc = true; else if (c == '"') inStr = false; continue; }
+        if (c == '"') { inStr = true; continue; }
+        if (c == '[') ++depth;
+        else if (c == ']') { if (--depth == 0) { begin = b; end = i; return true; } }
+    }
+    return false;
+}
+
 static void reloadBindings() {
     const std::string js = readGroupsJson();
     std::vector<GroupBinding> out;
@@ -1200,11 +1231,23 @@ static void reloadBindings() {
             jsonGet(obj, "id", g.id);
             jsonGet(obj, "name", g.name);
             jsonGetStringArray(obj, "cams", g.cams);
-            jsonGet(obj, "hotkey", g.hotkey);
-            std::string st, d1;
-            if (jsonGet(obj, "status", st) && jsonGet(obj, "d1", d1)) {   // объект midi внутри группы
-                g.midiStatus = std::atoi(st.c_str());
-                g.midiD1     = std::atoi(d1.c_str());
+
+            size_t ab = 0, ae = 0;
+            if (arrayBounds(obj, "binds", ab, ae)) {
+                size_t bb = 0, be = 0, bfrom = ab;
+                while (nextGroupObject(obj, bfrom, bb, be) && bb < ae) {
+                    const std::string bo = obj.substr(bb, be - bb);
+                    bfrom = be;
+                    Bind bind;
+                    jsonGet(bo, "action", bind.action);
+                    jsonGet(bo, "key", bind.key);
+                    std::string st, d1;
+                    if (jsonGet(bo, "status", st) && jsonGet(bo, "d1", d1)) {
+                        bind.midiStatus = std::atoi(st.c_str());
+                        bind.midiD1     = std::atoi(d1.c_str());
+                    }
+                    if (!bind.key.empty() || bind.midiStatus >= 0) g.binds.push_back(bind);
+                }
             }
             if (!g.id.empty()) out.push_back(g);
         }
@@ -1252,21 +1295,36 @@ static bool parseHotkey(const std::string& s, plat::HotKey& out) {
     return !out.key.empty();
 }
 
+// Что делать по привязке. Точка расширения: появится новое действие — добавить
+// ветку сюда и пункт в панели. Неизвестное действие не роняет и не молчит.
+static void runAction(const GroupBinding& g, const std::string& action, const char* src) {
+    if (action.empty() || action == "rec") { toggleRecGroup(g, src); return; }
+    consolePrintf("[%s] Группа «%s»: действие «%s» эта версия не умеет.\n",
+                  src, g.name.c_str(), action.c_str());
+}
+
+// Куда ведёт зарегистрированная клавиша: id -> (группа, привязка).
+static std::vector<std::pair<size_t, size_t>> g_hotkeyMap;   // под g_bindMutex
+
 // Перерегистрировать системные клавиши по текущим привязкам. Набор заменяется
 // целиком: проще и надёжнее, чем следить, что именно поменялось.
-// id клавиши = индекс группы в g_bindings, по нему же и находим её при нажатии.
 static void applyHotkeys() {
     if (!plat::hotkeysSupported()) return;
     std::vector<std::pair<int, plat::HotKey>> keys;
     std::vector<std::string> names;
     {
         std::lock_guard<std::mutex> lk(g_bindMutex);
-        for (size_t i = 0; i < g_bindings.size(); ++i) {
-            if (g_bindings[i].hotkey.empty()) continue;
-            plat::HotKey hk;
-            if (!parseHotkey(g_bindings[i].hotkey, hk)) continue;
-            keys.push_back({ static_cast<int>(i), hk });
-            names.push_back(g_bindings[i].name + " (" + g_bindings[i].hotkey + ")");
+        g_hotkeyMap.clear();
+        for (size_t gi = 0; gi < g_bindings.size(); ++gi) {
+            for (size_t bi = 0; bi < g_bindings[gi].binds.size(); ++bi) {
+                const Bind& b = g_bindings[gi].binds[bi];
+                if (b.key.empty()) continue;                 // это MIDI-привязка
+                plat::HotKey hk;
+                if (!parseHotkey(b.key, hk)) continue;
+                keys.push_back({ static_cast<int>(g_hotkeyMap.size()), hk });
+                names.push_back(g_bindings[gi].name + " (" + b.key + ")");
+                g_hotkeyMap.push_back({gi, bi});
+            }
         }
     }
     const std::vector<int> failed = plat::hotkeysApply(keys);
@@ -1287,23 +1345,29 @@ static void reloadBindingsAndHotkeys() {
 
 static void onHotkeyPressed(int id) {
     GroupBinding g;
+    std::string  action;
     {
         std::lock_guard<std::mutex> lk(g_bindMutex);
-        if (id < 0 || static_cast<size_t>(id) >= g_bindings.size()) return;
-        g = g_bindings[id];
+        if (id < 0 || static_cast<size_t>(id) >= g_hotkeyMap.size()) return;
+        const auto [gi, bi] = g_hotkeyMap[id];
+        if (gi >= g_bindings.size() || bi >= g_bindings[gi].binds.size()) return;
+        g      = g_bindings[gi];
+        action = g_bindings[gi].binds[bi].action;
     }
-    toggleRecGroup(g, "hotkey");
+    runAction(g, action, "hotkey");
 }
 
-// Совпало ли входящее MIDI-сообщение с привязкой группы. Сравниваем статус и
-// номер контроллера/ноты, но НЕ значение: у кнопки нажатие и отпускание
-// отличаются именно значением, и реагировать надо только на нажатие.
-static bool midiMatchesGroup(unsigned status, unsigned d1, GroupBinding& out) {
+// Совпало ли входящее MIDI-сообщение с привязкой. Сравниваем статус и номер
+// контроллера/ноты, но НЕ значение: у кнопки нажатие и отпускание отличаются
+// именно значением, и реагировать надо только на нажатие.
+static bool midiMatchesGroup(unsigned status, unsigned d1, GroupBinding& out, std::string& action) {
     std::lock_guard<std::mutex> lk(g_bindMutex);
     for (const GroupBinding& g : g_bindings) {
-        if (g.midiStatus < 0 || g.midiD1 < 0) continue;
-        if (static_cast<unsigned>(g.midiStatus) == status &&
-            static_cast<unsigned>(g.midiD1) == d1) { out = g; return true; }
+        for (const Bind& b : g.binds) {
+            if (b.midiStatus < 0 || b.midiD1 < 0) continue;
+            if (static_cast<unsigned>(b.midiStatus) == status &&
+                static_cast<unsigned>(b.midiD1) == d1) { out = g; action = b.action; return true; }
+        }
     }
     return false;
 }
@@ -1710,7 +1774,8 @@ static void midiWorker() {
         if (now - lastTrig < 80ms) continue;         // дребезг контакта
 
         GroupBinding g;
-        if (midiMatchesGroup(status, d1, g)) { lastTrig = now; toggleRecGroup(g, "midi"); }
+        std::string  action;
+        if (midiMatchesGroup(status, d1, g, action)) { lastTrig = now; runAction(g, action, "midi"); }
     }
 }
 

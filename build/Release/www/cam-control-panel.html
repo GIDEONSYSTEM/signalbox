@@ -451,25 +451,36 @@
   .keys-warn{font-size:11px; line-height:1.5; color:var(--warn); margin-bottom:12px;
              border:1px solid rgba(255,194,75,.28); background:rgba(255,194,75,.07);
              border-radius:9px; padding:8px 10px;}
-  .keys-row{display:flex; align-items:center; gap:9px; padding:8px 0;
-            border-top:1px solid var(--edge-2);}
-  .keys-row:first-child{border-top:none;}
-  .keys-name{flex:1 1 auto; min-width:0; font-weight:600; overflow:hidden; text-overflow:ellipsis;
-             white-space:nowrap;}
-  .keys-cams{flex:none; font-family:var(--cond); font-size:10px; letter-spacing:.06em; color:var(--idle);}
-  .keys-bind{flex:none; display:flex; align-items:center; gap:6px;}
-  .keys-btn{font-family:var(--mono); font-size:11px; padding:5px 9px; border-radius:7px;
-            border:1px solid var(--edge); background:#1c222b; color:var(--ink); cursor:pointer;
-            min-width:104px; text-align:center;}
-  .keys-btn:hover{border-color:rgba(255,255,255,.28);}
-  .keys-btn.set{color:var(--ok); border-color:rgba(65,214,126,.45);}
+  /* Группа заголовком, под ней строки действий: «Действие — привязки — добавить».
+     Одно действие может иметь сколько угодно клавиш и кнопок, каждая снимается
+     своим крестиком. */
+  .keys-group{padding:10px 0; border-top:1px solid var(--edge-2);}
+  .keys-group:first-child{border-top:none; padding-top:2px;}
+  .keys-ghead{display:flex; align-items:baseline; gap:8px; margin-bottom:7px;}
+  .keys-glabel{font-family:var(--cond); font-size:9px; letter-spacing:.1em; text-transform:uppercase;
+               color:var(--idle);}
+  .keys-gname{font-weight:700; font-size:14px; overflow:hidden; text-overflow:ellipsis;
+              white-space:nowrap; min-width:0;}
+  .keys-cams{font-family:var(--cond); font-size:10px; letter-spacing:.06em; color:var(--idle);}
+  .keys-act{display:flex; align-items:center; gap:8px; padding:5px 0 5px 12px; flex-wrap:wrap;}
+  .keys-aname{flex:none; font-size:12px; color:var(--ink-dim); min-width:64px;}
+  .keys-chips{flex:1 1 auto; display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-width:0;}
+  .keys-chip{display:inline-flex; align-items:center; gap:5px; font-family:var(--mono); font-size:11px;
+             padding:4px 5px 4px 9px; border-radius:7px; border:1px solid rgba(65,214,126,.45);
+             background:rgba(65,214,126,.08); color:var(--ok);}
+  .keys-chip.midi{border-color:rgba(120,170,255,.45); background:rgba(120,170,255,.09); color:#8fb6ff;}
+  .keys-chip-x{background:none; border:none; padding:0 1px; cursor:pointer; color:inherit;
+               opacity:.65; font-size:12px; line-height:1;}
+  .keys-chip-x:hover{opacity:1; color:var(--crit);}
+  .keys-none{font-size:11px; color:var(--idle);}
+  .keys-add{flex:none; font-family:var(--cond); font-size:11px; letter-spacing:.04em;
+            padding:5px 10px; border-radius:7px; border:1px dashed var(--edge);
+            background:none; color:var(--ink-dim); cursor:pointer; min-width:92px; text-align:center;}
+  .keys-add:hover{border-color:rgba(255,255,255,.3); color:var(--ink);}
   /* ждём ввода: поле пустое, поэтому держим высоту явно — иначе кнопка без
      текста схлопнулась бы и строка «прыгнула» */
-  .keys-btn.wait{border-color:var(--warn); background:rgba(255,194,75,.12);
-                 animation:pulse 1.1s infinite; min-height:25px;}
-  .keys-clear{flex:none; background:none; border:none; color:var(--idle); cursor:pointer;
-              font-size:15px; line-height:1; padding:2px 4px;}
-  .keys-clear:hover{color:var(--crit);}
+  .keys-add.wait{border-style:solid; border-color:var(--warn); background:rgba(255,194,75,.12);
+                 animation:pulse 1.1s infinite; min-height:26px;}
   .keys-empty{font-size:12px; color:var(--idle); padding:6px 0;}
 
   .ip-hint{font-size:11px; line-height:1.5; color:var(--idle); margin:9px 0 8px;}
@@ -1247,10 +1258,12 @@ async function loadGroups(){
       cams: Array.isArray(g.cams) ? g.cams.map(String) : [],
       // ⚠️ Привязки обязательно переносить: saveGroups отправляет массив целиком,
       // и потерянное здесь поле стёрлось бы при первом же сохранении групп.
-      hotkey: typeof g.hotkey === 'string' ? g.hotkey : '',
-      midi: (g.midi && typeof g.midi.status === 'number' && typeof g.midi.d1 === 'number')
-              ? {status: g.midi.status, d1: g.midi.d1} : null
+      binds: normalizeBinds(g)
     }));
+    // 🔴 Если на диске старый формат (hotkey/midi полями группы), СРАЗУ пишем
+    // файл в новом виде. Сервер читает только binds, и без этого назначенная
+    // раньше кнопка молча перестала бы работать до ближайшего сохранения групп.
+    if(migratedBinds){ migratedBinds = false; saveGroups(); }
   }catch(_){ groups = []; }
   renderGroups(); placeCards();
 }
@@ -1265,8 +1278,35 @@ function saveGroups(){
 }
 
 function addGroup(){
-  groups.push({id:newGid(), name:'Зал ' + (groups.length + 1), cams:[], hotkey:'', midi:null});
+  groups.push({id:newGid(), name:'Зал ' + (groups.length + 1), cams:[], binds:[]});
   saveGroups(); renderGroups(); placeCards();
+}
+
+/* Одна запись binds — ОДНА привязка: {action, key} либо {action, midi:{status,d1}}.
+   Поэтому их можно назначать сколько угодно и удалять по отдельности, а поле
+   action оставляет место будущим действиям кроме записи.
+   Заодно переносим старый формат (одна клавиша + один MIDI на группу), чтобы у
+   тех, кто уже что-то назначил, привязки не пропали при обновлении. */
+let migratedBinds = false;      // встретился старый формат — файл надо переписать
+
+function normalizeBinds(g){
+  const out = [];
+  if(Array.isArray(g.binds)){
+    for(const b of g.binds){
+      if(!b) continue;
+      if(typeof b.key === 'string' && b.key)
+        out.push({action: b.action || 'rec', key: b.key});
+      else if(b.midi && typeof b.midi.status === 'number' && typeof b.midi.d1 === 'number')
+        out.push({action: b.action || 'rec', midi: {status: b.midi.status, d1: b.midi.d1}});
+    }
+  }
+  if(typeof g.hotkey === 'string' && g.hotkey){
+    out.push({action:'rec', key: g.hotkey}); migratedBinds = true;
+  }
+  if(g.midi && typeof g.midi.status === 'number' && typeof g.midi.d1 === 'number'){
+    out.push({action:'rec', midi:{status: g.midi.status, d1: g.midi.d1}}); migratedBinds = true;
+  }
+  return out;
 }
 
 /* ---------- горячие клавиши и MIDI на запись группы ----------
@@ -1295,8 +1335,14 @@ function keyNameFromEvent(ev){
   return named[c] || '';
 }
 
-// Что сейчас ждёт ввода: {gid, kind:'key'|'midi', timer}. Держим ОТДЕЛЬНО от DOM
-// и рисуем из renderKeys — иначе ссылка на кнопку протухает при первой же
+/* Действия, которые можно повесить на клавишу. Добавить новое — дописать строку
+   сюда и ветку в runAction() на сервере; вид раздела подстроится сам. */
+const GROUP_ACTIONS = [
+  {id:'rec', name:'Запись', hint:'Старт и стоп на всех камерах группы'},
+];
+
+// Что сейчас ждёт ввода: {gid, action, kind:'key'|'midi', timer}. Держим ОТДЕЛЬНО
+// от DOM и рисуем из renderKeys — иначе ссылка на кнопку протухает при первой же
 // перерисовке списка, и «ожидание» подсвечивается у элемента, которого на
 // экране уже нет (именно так и было: нажатие визуально не отзывалось).
 let capture = null;
@@ -1307,16 +1353,16 @@ function stopCapture(){
   renderKeys();
 }
 
-function beginKeyCapture(g){
+function beginKeyCapture(g, action){
   stopCapture();
-  capture = {gid: g.id, kind: 'key', timer: null};
+  capture = {gid: g.id, action, kind: 'key', timer: null};
   renderKeys();
   showToast('Нажми сочетание клавиш · Esc — отмена');
 }
 
-function beginMidiCapture(g){
+function beginMidiCapture(g, action){
   stopCapture();
-  capture = {gid: g.id, kind: 'midi', timer: null};
+  capture = {gid: g.id, action, kind: 'midi', timer: null};
   renderKeys();
   showToast('Нажми кнопку на пульте');
   fetch(`${LV_BASE}/midi/last`,{cache:'no-store'}).then(r=>r.json()).then(d0=>{
@@ -1327,13 +1373,20 @@ function beginMidiCapture(g){
       try{
         const d = await (await fetch(`${LV_BASE}/midi/last`,{cache:'no-store'})).json();
         if(d.seq !== d0.seq){                       // пришло НОВОЕ сообщение — это и есть кнопка
-          g.midi = {status: d.status, d1: d.d1};
-          saveGroups(); stopCapture();
-          showToast('MIDI назначен: ' + midiLabel(g.midi));
+          const m = {status: d.status, d1: d.d1};
+          if(bindExists(g, action, null, m)) showToast('Эта кнопка уже назначена');
+          else { g.binds.push({action, midi: m}); saveGroups(); showToast('MIDI назначен: ' + midiLabel(m)); }
+          stopCapture();
         }
       }catch(_){ }
     }, 200);
   }).catch(()=>{ showToast('Сборщик не отвечает'); stopCapture(); });
+}
+
+// Не плодим дубли: одна и та же клавиша (или кнопка) на одно действие — один раз.
+function bindExists(g, action, key, midi){
+  return g.binds.some(b => b.action === action &&
+    (key ? b.key === key : (b.midi && midi && b.midi.status === midi.status && b.midi.d1 === midi.d1)));
 }
 
 // Перехват нажатия идёт в capture-фазе и гасится: пока ждём клавишу, она не
@@ -1350,8 +1403,13 @@ document.addEventListener('keydown', ev => {
   if(ev.shiftKey) parts.push('Shift');
   if(ev.metaKey)  parts.push('Win');
   parts.push(name);
+  const combo = parts.join('+');
   const g = groups.find(x => x.id === capture.gid);
-  if(g){ g.hotkey = parts.join('+'); saveGroups(); showToast('Клавиша назначена: ' + g.hotkey); }
+  if(g){
+    if(bindExists(g, capture.action, combo, null)) showToast('Это сочетание уже назначено');
+    else { g.binds.push({action: capture.action, key: combo}); saveGroups();
+           showToast('Клавиша назначена: ' + combo); }
+  }
   stopCapture();
 }, true);
 
@@ -1364,34 +1422,45 @@ function renderKeys(){
   }
   // Кнопка в ожидании ввода становится ПУСТОЙ и подсвечивается: пустое поле
   // читается как «сюда сейчас нажми», а надпись поверх этого только мешала.
-  const waiting = (gid, kind) => capture && capture.gid === gid && capture.kind === kind;
-  const btn = (gid, kind, cls, value, empty, hint) => {
-    const wait = waiting(gid, kind);
-    const cl = 'keys-btn ' + cls + (wait ? ' wait' : (value ? ' set' : ''));
-    return `<button class="${cl}" title="${hint}">${wait ? '' : hesc(value || empty)}</button>`;
-  };
+  const waiting = (gid, action, kind) =>
+    capture && capture.gid === gid && capture.action === action && capture.kind === kind;
 
   box.innerHTML = groups.map(g => `
-    <div class="keys-row" data-gid="${hesc(g.id)}">
-      <span class="keys-name">${hesc(g.name)}</span>
-      <span class="keys-cams">${g.cams.length} кам.</span>
-      <div class="keys-bind">
-        ${btn(g.id, 'key',  'k-key',  g.hotkey, 'Клавиша', 'Назначить клавишу')}
-        ${btn(g.id, 'midi', 'k-midi', g.midi ? midiLabel(g.midi) : '', 'MIDI', 'Назначить кнопку на MIDI-пульте')}
-        <button class="keys-clear" title="Убрать обе привязки">✕</button>
+    <div class="keys-group" data-gid="${hesc(g.id)}">
+      <div class="keys-ghead">
+        <span class="keys-glabel">Группа</span>
+        <span class="keys-gname">${hesc(g.name)}</span>
+        <span class="keys-cams">${g.cams.length} кам.</span>
       </div>
+      ${GROUP_ACTIONS.map(a => {
+        const mine = g.binds.map((b, i) => ({b, i})).filter(x => x.b.action === a.id);
+        const chips = mine.map(({b, i}) =>
+          `<span class="keys-chip${b.key ? '' : ' midi'}">${hesc(b.key || midiLabel(b.midi))}` +
+          `<button class="keys-chip-x" data-i="${i}" title="Убрать эту привязку">✕</button></span>`).join('');
+        const waitKey  = waiting(g.id, a.id, 'key');
+        const waitMidi = waiting(g.id, a.id, 'midi');
+        return `<div class="keys-act" data-action="${hesc(a.id)}">
+          <span class="keys-aname" title="${hesc(a.hint)}">${hesc(a.name)}</span>
+          <div class="keys-chips">${chips || '<span class="keys-none">не назначено</span>'}</div>
+          <button class="keys-add k-key${waitKey ? ' wait' : ''}" title="Добавить сочетание клавиш">${waitKey ? '' : '+ клавиша'}</button>
+          <button class="keys-add k-midi${waitMidi ? ' wait' : ''}" title="Добавить кнопку MIDI-пульта">${waitMidi ? '' : '+ MIDI'}</button>
+        </div>`;
+      }).join('')}
     </div>`).join('');
 
-  box.querySelectorAll('.keys-row').forEach(row => {
-    const g = groups.find(x => x.id === row.dataset.gid);
+  box.querySelectorAll('.keys-group').forEach(el => {
+    const g = groups.find(x => x.id === el.dataset.gid);
     if(!g) return;
-    // Повторное нажатие по ждущей кнопке отменяет ожидание — иначе выйти из него
-    // можно было бы только клавишей Esc.
-    row.querySelector('.k-key').onclick  = ()=> waiting(g.id,'key')  ? stopCapture() : beginKeyCapture(g);
-    row.querySelector('.k-midi').onclick = ()=> waiting(g.id,'midi') ? stopCapture() : beginMidiCapture(g);
-    row.querySelector('.keys-clear').onclick = ()=>{
-      g.hotkey = ''; g.midi = null; saveGroups(); renderKeys();
-    };
+    el.querySelectorAll('.keys-act').forEach(act => {
+      const a = act.dataset.action;
+      // Повторное нажатие по ждущей кнопке отменяет ожидание — иначе выйти из
+      // него можно было бы только клавишей Esc.
+      act.querySelector('.k-key').onclick  = ()=> waiting(g.id,a,'key')  ? stopCapture() : beginKeyCapture(g, a);
+      act.querySelector('.k-midi').onclick = ()=> waiting(g.id,a,'midi') ? stopCapture() : beginMidiCapture(g, a);
+      act.querySelectorAll('.keys-chip-x').forEach(x => {
+        x.onclick = ()=>{ g.binds.splice(parseInt(x.dataset.i, 10), 1); saveGroups(); renderKeys(); };
+      });
+    });
   });
 }
 function removeGroup(id){          // камеры не теряются — уезжают в «Без группы»
