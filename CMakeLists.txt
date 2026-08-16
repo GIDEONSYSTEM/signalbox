@@ -153,7 +153,15 @@ if(APPLE)
     find_library(APPKIT_FW     AppKit     REQUIRED)
     find_library(FOUNDATION_FW Foundation REQUIRED)
     find_library(COREMIDI_FW   CoreMIDI   REQUIRED)
-    target_link_libraries(SignalBox PRIVATE ${APPKIT_FW} ${FOUNDATION_FW} ${COREMIDI_FW})
+    # Carbon — ради RegisterEventHotKey (системные горячие клавиши). API старое и
+    # помечено устаревшим, но замены для «зарегистрировать комбинацию, не читая
+    # чужой ввод» у Apple нет: всё современное (CGEventTap, NSEvent monitor)
+    # требует разрешения «Мониторинг ввода» и видит вообще всё нажатое.
+    # Без этой строки файл КОМПИЛИРУЕТСЯ, но линковка падает на
+    # _RegisterEventHotKey / _GetApplicationEventTarget / _InstallEventHandler.
+    find_library(CARBON_FW     Carbon     REQUIRED)
+    target_link_libraries(SignalBox PRIVATE
+        ${APPKIT_FW} ${FOUNDATION_FW} ${COREMIDI_FW} ${CARBON_FW})
 endif()
 
 if(WIN32)
