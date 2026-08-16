@@ -1011,7 +1011,7 @@ function buildCard(cam){
          перехватывает клик, поэтому «нажать в любое место» и получается. -->
     <div class="oh-alert">
       <div class="oh-big">${THERM_SVG}</div>
-      <div class="oh-title">Скоро перегрев</div>
+      <div class="oh-title">Высокая температура</div>
       <div class="oh-hint">Нажмите, чтобы скрыть</div>
     </div>`;
   app.insertBefore(card, empty);       // карточки идут перед плейсхолдером
@@ -1208,7 +1208,7 @@ function updateCard(e, d){
   e.ohState = oh;
   e.card.classList.toggle('overheat', oh >= 1);
   e.card.classList.toggle('overheat-alert', oh >= 1 && !e.ohHidden);
-  if(oh >= 1) e.ohTitle.textContent = (oh >= 2) ? 'Перегрев' : 'Скоро перегрев';
+  if(oh >= 1) e.ohTitle.textContent = (oh >= 2) ? 'Перегрев' : 'Высокая температура';
 
   e.rec = !!d.rec;
   e.card.classList.toggle('rec', e.rec);
