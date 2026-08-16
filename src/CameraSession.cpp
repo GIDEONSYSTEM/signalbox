@@ -274,6 +274,7 @@ CamStatus CameraSession::readStatusLocked() {
         SDK::CrDevicePropertyCode::CrDeviceProperty_RecordingState,
         SDK::CrDevicePropertyCode::CrDeviceProperty_MediaSLOT1_RemainingTime,
         SDK::CrDevicePropertyCode::CrDeviceProperty_MediaSLOT1_WritingState,
+        SDK::CrDevicePropertyCode::CrDeviceProperty_DeviceOverheatingState,
         SDK::CrDevicePropertyCode::CrDeviceProperty_IsoSensitivity,
         SDK::CrDevicePropertyCode::CrDeviceProperty_IsoCurrentSensitivity,
         SDK::CrDevicePropertyCode::CrDeviceProperty_FNumber,
@@ -323,6 +324,27 @@ CamStatus CameraSession::readStatusLocked() {
             case SDK::CrDevicePropertyCode::CrDeviceProperty_MediaSLOT1_WritingState:
                 s.writing = (val == SDK::CrMediaSlotWritingState_ContentsWriting);
                 break;
+            case SDK::CrDevicePropertyCode::CrDeviceProperty_DeviceOverheatingState: {
+                // Значения ровно из enum SDK: 0 норма, 1 близко к перегреву, 2 перегрев.
+                const int st = static_cast<int>(val);
+                if (st >= SDK::CrDeviceOverheatingState_NotOverheating &&
+                    st <= SDK::CrDeviceOverheatingState_Overheating) {
+                    s.overheat = st;
+                    // Смена состояния — событие для лога: перегрев в студии
+                    // разбирают потом, и запись «когда началось» дороже строчки.
+                    if (m_overheatLogged != st) {
+                        m_overheatLogged = st;
+                        if (st == SDK::CrDeviceOverheatingState_Overheating)
+                            clog("[CAM %d %s] 🔥 ПЕРЕГРЕВ — камера может остановить запись\n",
+                                 m_index, modelUtf8().c_str());
+                        else if (st == SDK::CrDeviceOverheatingState_PreOverheating)
+                            clog("[CAM %d %s] нагрев близок к пределу\n", m_index, modelUtf8().c_str());
+                        else
+                            clog("[CAM %d %s] температура вернулась в норму\n", m_index, modelUtf8().c_str());
+                    }
+                }
+                break;
+            }
             case SDK::CrDevicePropertyCode::CrDeviceProperty_IsoSensitivity: {
                 std::uint32_t iv = static_cast<std::uint32_t>(val) & kIsoValueMask;
                 s.iso = (iv == kIsoAutoValue) ? std::string("AUTO")

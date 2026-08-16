@@ -41,6 +41,10 @@ struct CamStatus {
     bool        acPower     = false;// running on external/USB power (plugged in / charging)
     int         cardMinutes = -1;   // minutes,        -1 = unknown
     bool        writing     = false;
+    // Перегрев, как его сообщает сама камера (DeviceOverheatingState):
+    // -1 неизвестно (камера свойство не отдаёт), 0 норма, 1 близко к перегреву,
+    // 2 перегрев. Значения — из enum SDK, не выдуманные.
+    int         overheat    = -1;
     std::string iso;                // "AUTO" or number string, empty = unknown
     int         isoEff      = -1;   // effective ISO number, -1 = unknown / AUTO
     // Полный список ISO, который отдаёт САМА камера: у разных тушек и режимов он
@@ -150,6 +154,7 @@ private:
     std::atomic<long long>     m_attemptMs{0};          // steady_clock ms of last attempt
     std::atomic<unsigned int>  m_lastError{0};
     int                        m_readFailStreak = 0;    // consecutive failed property reads (m_io)
+    int                        m_overheatLogged = -1;   // последнее записанное в лог состояние нагрева (m_io)
     CamStatus                  m_lastGood;              // last good snapshot, for debounce (m_io)
     std::vector<CrInt8u>       m_lvBuf;                 // reusable live-view image buffer (m_io)
     bool                       m_osdEnabled = false;    // OSDImageMode turned on once (m_io)

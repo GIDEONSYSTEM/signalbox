@@ -244,6 +244,26 @@
               background:rgba(0,0,0,.28); border-radius:1px;}
   .num-ok{color:var(--ok)!important} .num-warn{color:var(--warn)!important} .num-crit{color:var(--crit)!important}
 
+  /* ---- перегрев ----
+     Камера сама сообщает состояние (DeviceOverheatingState): 1 — близко к
+     пределу, 2 — перегрев. При 2 карточку накрывает оповещение целиком; когда
+     его убрали — остаётся мигающий градусник в шапке, рядом с остатком карты. */
+  @keyframes ohBlink{0%,100%{opacity:1} 50%{opacity:.25}}
+  .oh-alert{position:absolute; inset:0; z-index:5; display:none; border-radius:inherit;
+            flex-direction:column; align-items:center; justify-content:center; gap:6px;
+            background:rgba(8,10,14,.82); cursor:pointer; user-select:none;}
+  .card.overheat-alert .oh-alert{display:flex;}
+  .oh-big{color:var(--crit); animation:ohBlink 1s infinite;}
+  .oh-big svg{width:64px; height:64px; display:block;}
+  .oh-title{font-family:var(--cond); font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+            font-size:15px; color:var(--crit); animation:ohBlink 1s infinite;}
+  .oh-hint{font-size:11px; color:var(--ink-dim); margin-top:2px;}
+  /* Миниатюра в шапке: между остатком карты и кнопкой REC */
+  .oh-badge{flex:none; display:none; align-items:center; color:var(--crit);
+            animation:ohBlink 1s infinite;}
+  .oh-badge svg{width:17px; height:17px; display:block;}
+  .card.overheat .oh-badge{display:inline-flex;}
+
   /* Экспозиция одной строкой: ISO · Shutter · Aperture. Кнопка ЗАПИСЬ отсюда
      переехала в шапку карточки — к модели и остатку карты. */
   .controls{display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px;}
@@ -670,6 +690,12 @@ const CONFIG = {
 };
 
 const BOLT_SVG = '<svg viewBox="0 0 24 24"><path d="M13 2 L4 14 h6 l-1 8 l9-12 h-6 z"/></svg>';
+// Градусник рисуем вектором, а не эмодзи: эмодзи выглядит по-разному в каждой
+// системе, а панель ещё и в доке OBS живёт.
+const THERM_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+  'stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M14 14.76V4.5a2.5 2.5 0 0 0-5 0v10.26a4.5 4.5 0 1 0 5 0z"/>' +
+  '<path d="M11.5 8.5v7.2"/></svg>';
 const nearestK = k => CONFIG.kelvinValues.reduce((a,b)=>Math.abs(b-k)<Math.abs(a-k)?b:a);
 const clsBat  = b => b<=CONFIG.battery.crit ? 'crit' : b<=CONFIG.battery.warn ? 'warn' : 'ok';
 const clsCard = m => m<=CONFIG.cardMin.crit ? 'crit' : m<=CONFIG.cardMin.warn ? 'warn' : 'ok';
@@ -921,6 +947,7 @@ function buildCard(cam){
             <div class="bolt" title="Питание от сети">${BOLT_SVG}</div>
           </div>
           <div class="cardm"><div class="sd"></div><div class="val card-val">--<span class="u">мин</span></div></div>
+          <div class="oh-badge" title="Перегрев камеры">${THERM_SVG}</div>
           <div class="rec-btn" title="Старт и стоп записи"><span class="ic"></span><span class="t">REC</span></div>
         </div>
       </div>
@@ -979,6 +1006,13 @@ function buildCard(cam){
           <label class="lv-fr"><input type="checkbox" class="lv-cb-zone" checked>Зона АФ</label>
         </div>
       </div>
+    </div>
+    <!-- Экстренное оповещение о перегреве: накрывает карточку целиком. Само
+         перехватывает клик, поэтому «нажать в любое место» и получается. -->
+    <div class="oh-alert">
+      <div class="oh-big">${THERM_SVG}</div>
+      <div class="oh-title">Перегрев</div>
+      <div class="oh-hint">Нажмите, чтобы скрыть</div>
     </div>`;
   app.insertBefore(card, empty);       // карточки идут перед плейсхолдером
   const e = {
@@ -1004,6 +1038,8 @@ function buildCard(cam){
     shPlus:   card.querySelector('.step.sh-plus'),
     wbMinus:  card.querySelector('.step.wb-minus'),
     wbPlus:   card.querySelector('.step.wb-plus'),
+    ohState:  0,           // последнее состояние нагрева, чтобы ловить именно ПЕРЕХОД
+    ohHidden: false,       // оповещение свёрнуто человеком
     pend:     {},          // что человек выбрал и что камера ещё не подтвердила
     wbOpts:   null, wbSig: null,
     lvFrame:  card.querySelector('.lv-frame'),
@@ -1048,6 +1084,13 @@ function buildCard(cam){
   e.lvRotBtn.onclick  = (ev)=>{ ev.stopPropagation(); e.lvRot=(e.lvRot+90)%360; lvApplyRotation(e); };
   e.lvFsBtn.onclick   = (ev)=>{ ev.stopPropagation(); lvFsEnter(e); };
   e.lvExitBtn.onclick = (ev)=>{ ev.stopPropagation(); lvFsExit(e); };
+  // Оповещение накрывает карточку целиком и само ловит клик — поэтому «нажать в
+  // любое место» получается само собой, без обработчика на всей карточке.
+  card.querySelector('.oh-alert').onclick = (ev)=>{
+    ev.stopPropagation();
+    e.ohHidden = true;
+    e.card.classList.remove('overheat-alert');
+  };
   // ---- группы: карточку можно перетащить; селектор — запасной путь для тача ----
   e.ip = cam.ip || '';
   card.draggable = true;
@@ -1149,6 +1192,17 @@ function updateCard(e, d){
   // в порядке обнаружения и между запусками может достаться другой камере.
   // Со старым IP карточка уехала бы в чужую группу.
   if(d.ip) e.ip = d.ip;
+  // Перегрев. Состояние приходит от камеры: 0 норма, 1 близко к пределу,
+  // 2 перегрев. Оповещение во весь размер карточки показываем на ПЕРЕХОДЕ в
+  // перегрев — иначе, свернув его один раз, человек не увидел бы следующий
+  // случай. Свёрнутое оповещение оставляет мигающий градусник в шапке.
+  const oh = (typeof d.overheat === 'number') ? d.overheat : 0;
+  if(oh > e.ohState) e.ohHidden = false;        // стало хуже — показать снова
+  if(oh === 0) e.ohHidden = false;              // остыла — вернуть к исходному
+  e.ohState = oh;
+  e.card.classList.toggle('overheat', oh >= 1);
+  e.card.classList.toggle('overheat-alert', oh >= 2 && !e.ohHidden);
+
   e.rec = !!d.rec;
   e.card.classList.toggle('rec', e.rec);
   e.card.classList.toggle('on-power', !!d.acPower);

@@ -636,6 +636,8 @@ static std::string buildStatusJson() {
         j += "\"acPower\":" + std::string(s.acPower ? "true" : "false") + ",";
         j += "\"cardMinutes\":" + (s.cardMinutes < 0 ? std::string("null") : std::to_string(s.cardMinutes)) + ",";
         j += "\"writing\":" + std::string(s.writing ? "true" : "false") + ",";
+        // Перегрев по данным камеры: null = не сообщает, 0 норма, 1 близко, 2 перегрев.
+        j += "\"overheat\":" + (s.overheat < 0 ? std::string("null") : std::to_string(s.overheat)) + ",";
         j += "\"iso\":"     + (s.iso.empty() ? std::string("null") : "\"" + jsonEscape(s.iso) + "\"") + ",";
         j += "\"isoEff\":"  + (s.isoEff < 0 ? std::string("null") : std::to_string(s.isoEff)) + ",";
         // Список ISO самой камеры: панель больше не гадает по зашитой таблице.
