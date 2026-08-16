@@ -205,6 +205,14 @@ bool copyTree(const std::string& srcDir, const std::string& dstDir) {
     return rc < 8;
 }
 
+std::string localTimeHms() {
+    SYSTEMTIME t{};
+    GetLocalTime(&t);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02u:%02u:%02u", t.wHour, t.wMinute, t.wSecond);
+    return buf;
+}
+
 // ---------------- консоль ----------------
 // Печатаем настоящим Unicode (UTF-16): так вывод не зависит от кодовой страницы
 // консоли, которую SDK Sony сбрасывает при Connect. Перенаправленный поток —

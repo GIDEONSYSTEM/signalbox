@@ -50,6 +50,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <cwchar>
 #include <functional>
 #include <string>
@@ -337,6 +338,15 @@ bool copyTree(const std::string& srcDir, const std::string& dstDir) {
     int rc = 1;
     shellCommand("/usr/bin/rsync -a '" + srcDir + "/' '" + dstDir + "/'", 180000, &rc);
     return rc == 0;
+}
+
+std::string localTimeHms() {
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_r(&t, &tm);                 // потокобезопасный вариант POSIX
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return buf;
 }
 
 // ---------------- консоль ----------------

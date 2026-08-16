@@ -334,13 +334,18 @@ CamStatus CameraSession::readStatusLocked() {
                     // разбирают потом, и запись «когда началось» дороже строчки.
                     if (m_overheatLogged != st) {
                         m_overheatLogged = st;
+                        // Со временем: тепловые события потом разбирают по логу,
+                        // и «в котором часу началось» — половина ответа.
+                        const std::string at = plat::localTimeHms();
                         if (st == SDK::CrDeviceOverheatingState_Overheating)
-                            clog("[CAM %d %s] 🔥 ПЕРЕГРЕВ — камера может остановить запись\n",
-                                 m_index, modelUtf8().c_str());
+                            clog("[%s] [CAM %d %s] 🔥 ПЕРЕГРЕВ — камера вот-вот остановит запись\n",
+                                 at.c_str(), m_index, modelUtf8().c_str());
                         else if (st == SDK::CrDeviceOverheatingState_PreOverheating)
-                            clog("[CAM %d %s] нагрев близок к пределу\n", m_index, modelUtf8().c_str());
+                            clog("[%s] [CAM %d %s] нагрев близок к пределу — оператор предупреждён\n",
+                                 at.c_str(), m_index, modelUtf8().c_str());
                         else
-                            clog("[CAM %d %s] температура вернулась в норму\n", m_index, modelUtf8().c_str());
+                            clog("[%s] [CAM %d %s] температура вернулась в норму\n",
+                                 at.c_str(), m_index, modelUtf8().c_str());
                     }
                 }
                 break;
