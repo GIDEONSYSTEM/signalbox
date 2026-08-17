@@ -121,9 +121,31 @@ bool spawnProcess(const std::vector<std::string>& argv, const std::string& workD
     posix_spawn_file_actions_init(&acts);
     if (!workDir.empty()) posix_spawn_file_actions_addchdir_np(&acts, workDir.c_str());
 
+    // 🔴 Потомок обязан стартовать с ЧИСТОЙ таблицей дескрипторов. По умолчанию
+    // POSIX отдаёт ему всё открытое, а среди нашего открытого есть файл-замок
+    // «единственный экземпляр». flock держится за описанием файла и переживает
+    // exec, поэтому замок уезжал по цепочке: уходящая копия -> установщик
+    // обновления -> запущенная им свежая копия. Свежая копия видела ЗАНЯТЫЙ
+    // замок (занятый ею же самой, через унаследованный дескриптор), считала себя
+    // вторым экземпляром и через 15 секунд ожидания выходила. Со стороны:
+    // «обновилось, но не запустилось». Замерено lsof: на файле-замке висели ДВА
+    // дескриптора одного и того же процесса.
+    // POSIX_SPAWN_CLOEXEC_DEFAULT закрывает у потомка всё, кроме явно
+    // перечисленного, и чинит этот класс ошибок целиком — заодно слушающий сокет
+    // и открытый лог тоже больше никуда не утекают.
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+    // stdin/stdout/stderr при этом флаге тоже закрылись бы: dup2 сам в себя —
+    // принятый способ сказать «эти три оставить».
+    posix_spawn_file_actions_adddup2(&acts, 0, 0);
+    posix_spawn_file_actions_adddup2(&acts, 1, 1);
+    posix_spawn_file_actions_adddup2(&acts, 2, 2);
+
     pid_t pid = 0;
-    const int rc = posix_spawn(&pid, argv[0].c_str(), &acts, nullptr, cargv.data(), environ);
+    const int rc = posix_spawn(&pid, argv[0].c_str(), &acts, &attr, cargv.data(), environ);
     posix_spawn_file_actions_destroy(&acts);
+    posix_spawnattr_destroy(&attr);
     if (rc != 0) return false;
     if (!wait) return true;
 
