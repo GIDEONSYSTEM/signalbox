@@ -98,8 +98,18 @@ echo "  собираю компонент"
 pkgbuild --analyze --root "$ROOT" "$WORK/component.plist" >/dev/null
 plutil -replace 0.BundleIsRelocatable -bool false "$WORK/component.plist"
 
+# 🔴 --scripts обязателен: postinstall отдаёт бандл пользователю. Пакет ставится
+# от root, а обновление копирует новый бандл поверх старого от имени
+# пользователя — без смены владельца программа не может себя обновить вообще
+# (поймано на живом обновлении 1.0.6 -> 1.0.8, см. §14).
+SCRIPTS="$WORK/scripts"
+mkdir -p "$SCRIPTS"
+cp res/pkg-scripts/postinstall "$SCRIPTS/postinstall"
+chmod +x "$SCRIPTS/postinstall"
+
 pkgbuild --root "$ROOT" \
          --component-plist "$WORK/component.plist" \
+         --scripts "$SCRIPTS" \
          --identifier "$BUNDLE_ID" \
          --version "$VERSION" \
          --install-location /Applications \

@@ -449,15 +449,54 @@ static int applyUpdate(const std::string& cmdLine) {
     if (target.empty()) return 1;
     const unsigned long pid = std::strtoul(cmdLine.c_str() + afterTarget, nullptr, 10);
 
+    // 🔴 Установщик — отдельный процесс без консоли и без общего лога, и до
+    // 2026-08-17 он не оставлял о себе НИЧЕГО. Из-за этого «обновление не
+    // работает» пришлось разбирать по отчётам о падении и опросу ps. Теперь
+    // каждый шаг пишется рядом с данными: разбор строки, копирование, запуск.
+    // Свой лог, а не общий: общий принадлежит работающей программе, и
+    // openLogFile() затёр бы его ротацией.
+    const std::string ilog = plat::joinPath(plat::dataDir(), "update-install.log");
+    std::string trace = "[" + plat::localTimeHms() + "] цель: " + target +
+                        ", pid прежней копии: " + std::to_string(pid) + "\n";
+
     plat::waitForProcess(pid, 30000);
     std::this_thread::sleep_for(700ms);           // дать ОС отпустить DLL
 
     // Копируем поверх, не удаляя лишнее в приёмнике: данные установки
     // (cameras.txt, groups.json, settings.json) в архив не входят и должны пережить обновление.
     // На macOS данные и так лежат вне бандла (см. plat::dataDir), но правило то же.
-    if (!plat::copyTree(plat::joinPath(updateStagingDir(), payloadName()), target)) return 1;
+    const std::string src = plat::joinPath(updateStagingDir(), payloadName());
+    if (!plat::copyTree(src, target)) {
+        // Самая частая причина на macOS: бандл принадлежит root (его так ставит
+        // .pkg), а установщик работает от пользователя. Пишем прямо, что делать.
+        trace += "[" + plat::localTimeHms() + "] НЕ УДАЛОСЬ скопировать " + src +
+                 " -> " + target + "\n"
+                 "    Проверь права: если программу ставил .pkg старее 1.0.8, бандл\n"
+                 "    принадлежит root, и обновление в него писать не может. Лечится\n"
+                 "    установкой свежего .pkg либо командой:\n"
+                 "    sudo chown -R \"$(id -un)\" \"" + target + "\"\n";
+        plat::writeFile(ilog, trace);
+        return 1;
+    }
+    trace += "[" + plat::localTimeHms() + "] скопировано\n";
 
-    plat::launch(plat::joinPath(target, exeRelToInstall()), "", target);
+    // 🔴 Запускаем с --restarted, и это не косметика. Установщик УНАСЛЕДОВАЛ от
+    // уходящей копии файловый замок «единственный экземпляр»: на POSIX flock
+    // держится за открытым описанием файла, а оно переживает fork/exec. Пока
+    // установщик жив, замок занят, и свежая копия без --restarted мгновенно
+    // считает себя вторым экземпляром и выходит — «обновилось, но не
+    // запустилось». С --restarted она ждёт слот до ~15 с, а установщик выходит
+    // сразу после запуска, так что слот освобождается.
+    // Замеряно: с занятым замком копия живёт секунды и гаснет, со свободным
+    // работает. Течь самого описания чинится отдельно (FD_CLOEXEC в
+    // acquireSingleInstance), но это поможет только обновлениям С 1.0.8 и выше —
+    // старые копии всё равно передадут замок, поэтому ждать обязан НОВЫЙ.
+    // Заодно --restarted не даёт открыть второй таб панели: она уже открыта.
+    if (!plat::launch(plat::joinPath(target, exeRelToInstall()), "--restarted", target))
+        trace += "[" + plat::localTimeHms() + "] НЕ УДАЛОСЬ запустить обновлённую копию\n";
+    else
+        trace += "[" + plat::localTimeHms() + "] обновлённая копия запущена\n";
+    plat::writeFile(ilog, trace);
     return 0;
 }
 

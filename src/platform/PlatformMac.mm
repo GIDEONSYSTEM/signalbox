@@ -438,7 +438,12 @@ bool acquireSingleInstance(const std::string& name, bool waitForPrevious) {
     const std::string path = joinPath(tempDir(), name + ".lock");
     const int tries = waitForPrevious ? 75 : 1;          // ~15 с
     for (int i = 0; i < tries; ++i) {
-        if (g_lockFd < 0) g_lockFd = ::open(path.c_str(), O_CREAT | O_RDWR, 0644);
+        // 🔴 O_CLOEXEC обязателен. flock держится за ОПИСАНИЕМ открытого файла, а
+        // оно переживает fork/exec: без этого флага любой запущенный нами процесс
+        // (установщик обновления!) уносит замок с собой и держит его, пока жив.
+        // Кончалось это тем, что обновлённая копия считала себя вторым
+        // экземпляром и мгновенно выходила — «обновилось, но не запустилось».
+        if (g_lockFd < 0) g_lockFd = ::open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644);
         if (g_lockFd < 0) return true;                   // не смогли проверить — не мешаем старту
         if (::flock(g_lockFd, LOCK_EX | LOCK_NB) == 0) return true;
         if (i + 1 < tries) std::this_thread::sleep_for(std::chrono::milliseconds(200));
