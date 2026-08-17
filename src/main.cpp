@@ -413,15 +413,41 @@ static bool startUpdateInstall(std::string& err) {
 }
 
 // Режим установщика: ждём выхода старого процесса, копируем файлы, запускаем обновлённую копию.
+//
+// 🐞 Разбор обязан работать И БЕЗ КАВЫЧЕК вокруг цели. Строку собирает уходящая
+// СТАРАЯ копия (`--apply-update "<цель>" <pid>`), а до нас она доезжает уже
+// разобранной операционной системой: на Windows `GetCommandLineW` отдаёт её
+// дословно, с кавычками, а на macOS argv плоский — кавычки съедаются при
+// разборе в `plat::launch` и обратно не появляются. Пока здесь стоял поиск
+// кавычки, установщик на macOS молча выходил с кодом 1: программа скачивала
+// архив, распаковывала, гасила себя — и не обновлялась. Найдено на живом
+// обновлении 1.0.6 -> 1.0.8.
+// Старые копии (1.0.6, 1.0.7) шлют строку по-прежнему, поэтому кавычечная
+// ветка остаётся первой и поведение на Windows не меняется.
 static int applyUpdate(const std::string& cmdLine) {
-    // ... --apply-update "<target>" <pid>
+    // ... --apply-update "<target>" <pid>   ИЛИ   ... --apply-update <target> <pid>
     const size_t k = cmdLine.find("--apply-update");
     if (k == std::string::npos) return 1;
-    size_t q1 = cmdLine.find('"', k);
-    size_t q2 = (q1 == std::string::npos) ? q1 : cmdLine.find('"', q1 + 1);
-    if (q2 == std::string::npos) return 1;
-    const std::string target = cmdLine.substr(q1 + 1, q2 - q1 - 1);
-    const unsigned long pid = std::strtoul(cmdLine.c_str() + q2 + 1, nullptr, 10);
+    size_t p = k + std::strlen("--apply-update");
+    while (p < cmdLine.size() && cmdLine[p] == ' ') ++p;
+
+    std::string target;
+    size_t afterTarget = std::string::npos;
+    if (p < cmdLine.size() && cmdLine[p] == '"') {
+        const size_t q2 = cmdLine.find('"', p + 1);
+        if (q2 == std::string::npos) return 1;
+        target      = cmdLine.substr(p + 1, q2 - p - 1);
+        afterTarget = q2 + 1;
+    } else {
+        // Без кавычек: pid — последнее слово строки, значит всё до него цель.
+        // Так разбирается и путь с пробелами, ради которых кавычки и вводили.
+        const size_t lastSp = cmdLine.find_last_of(' ');
+        if (lastSp == std::string::npos || lastSp <= p) return 1;
+        target      = cmdLine.substr(p, lastSp - p);
+        afterTarget = lastSp;
+    }
+    if (target.empty()) return 1;
+    const unsigned long pid = std::strtoul(cmdLine.c_str() + afterTarget, nullptr, 10);
 
     plat::waitForProcess(pid, 30000);
     std::this_thread::sleep_for(700ms);           // дать ОС отпустить DLL

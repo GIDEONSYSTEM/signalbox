@@ -213,10 +213,25 @@ std::string exeDir() {
 
 // bundlePath у голого бинарника — просто папка с ним, у бандла — сам .app.
 // Отличаем по расширению, а не по факту «непусто».
+// 🐞 Путь ОБЯЗАН быть разрешён через realpath, как и exePath(). NSBundle отдаёт
+// его таким, каким приложение запустили, а exePath() — уже развёрнутым. Внутри
+// TMPDIR это разные строки: `/var/folders/…` против `/private/var/folders/…`,
+// потому что /var — символическая ссылка на /private/var.
+// Чем это кончалось: установщик обновления считает путь к бинарнику ОТНОСИТЕЛЬНО
+// installRoot() (exeRelToInstall в main.cpp). Префикс не совпадал, относительный
+// путь молча превращался в абсолютный, и обновлённую копию запускали по адресу
+// вида `/Applications/SignalBox.app/private/var/…` — то есть никуда. Файлы при
+// этом копировались, поэтому выглядело как «обновилось, но не запустилось».
+// Найдено на живом обновлении 1.0.6 -> 1.0.8; воспроизводится только из TMPDIR,
+// из папки без символических ссылок всё работало.
 std::string installRoot() {
     @autoreleasepool {
         NSString* p = [[NSBundle mainBundle] bundlePath];
-        const std::string s = p ? [p UTF8String] : std::string();
+        std::string s = p ? [p UTF8String] : std::string();
+        if (!s.empty()) {
+            char resolved[PATH_MAX] = {0};
+            if (::realpath(s.c_str(), resolved)) s = resolved;
+        }
         if (s.size() > 4 && s.compare(s.size() - 4, 4, ".app") == 0) return s;
         return exeDir();
     }
@@ -359,12 +374,23 @@ void writeConsole(const std::string& s) {
 // ---------------- процессы ----------------
 // Своих аргументов процесс в POSIX не хранит в виде строки — собираем сами, в
 // том же виде, в каком main.cpp её потом ищет (--restarted, --apply-update).
+// ⚠️ argv в POSIX плоский: границы аргументов при сборке строки теряются, и
+// склейка через пробел даёт строку, которую нельзя разобрать обратно. Аргумент
+// с пробелом поэтому возвращаем в кавычках — так же выглядит строка на Windows,
+// где её отдаёт GetCommandLineW дословно.
+// 🐞 Пока этого не было, установщик обновления не находил путь к цели (он ищет
+// кавычки) и молча выходил: обновление на macOS не работало вовсе. Разбор в
+// applyUpdate теперь переживает и отсутствие кавычек, но врать про «командную
+// строку целиком» слой всё равно не должен.
 std::string commandLine() {
     @autoreleasepool {
         std::string line;
         for (NSString* a in [[NSProcessInfo processInfo] arguments]) {
+            const char* utf8 = [a UTF8String];
+            const std::string arg = utf8 ? utf8 : "";
             if (!line.empty()) line += ' ';
-            line += [a UTF8String];
+            if (arg.find(' ') != std::string::npos) { line += '"'; line += arg; line += '"'; }
+            else                                      line += arg;
         }
         return line;
     }
