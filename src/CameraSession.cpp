@@ -1,4 +1,5 @@
 #include "CameraSession.h"
+#include "Json.h"
 #include "platform/Platform.h"
 
 #include <chrono>
@@ -732,6 +733,85 @@ bool CameraSession::setRec(bool start) {
     SDK::SendCommand(m_handle, SDK::CrCommandId::CrCommandId_MovieRecord,
                      SDK::CrCommandParam::CrCommandParam_Up);
     return true;
+}
+
+} // namespace coll
+
+// ---------------------------------------------------------------------------
+// cam::ICamera: общая часть, через которую с камерой говорит main.cpp
+// ---------------------------------------------------------------------------
+namespace coll {
+
+// Отображаемое имя модели. Таблица сониевская, поэтому живёт здесь, а не в
+// main.cpp: точное совпадение, без поиска подстроки — из-за него ILME-FX30
+// когда-то показывалась как FX3.
+std::string CameraSession::modelDisplay() const {
+    const std::string m = modelUtf8();
+    if (m == "ZV-E10M2") return "ZV-E10 II";   // SDK отдаёт её именно так
+    return m;
+}
+
+namespace {
+// {"cur":N|null,"opts":[[enc,"label"],...],"rw":bool}
+// rw — можно ли менять свойство прямо сейчас (камера сообщает это сама).
+std::string propOptsJson(const CamPropOpts& p) {
+    std::string j = "{\"cur\":" + (p.cur < 0 ? std::string("null") : std::to_string(p.cur)) + ",\"opts\":[";
+    for (size_t k = 0; k < p.opts.size(); ++k) {
+        if (k) j += ",";
+        j += "[" + std::to_string(p.opts[k].first) + ",\"" + jsonw::esc(p.opts[k].second) + "\"]";
+    }
+    j += "],\"rw\":" + std::string(jsonw::boolStr(p.writable)) + "}";
+    return j;
+}
+} // namespace
+
+// Фрагмент /status.json для камеры Sony. Форма ровно та же, что была в
+// buildStatusJson до появления второго вендора, плюс общие поля key/vendor.
+std::string CameraSession::statusJson() {
+    const CamStatus s = readStatus();
+    std::string j = "{";
+    j += "\"key\":\""    + jsonw::esc(key()) + "\",";
+    j += "\"vendor\":\"" + std::string(cam::vendorTag(cam::Vendor::Sony)) + "\",";
+    j += "\"id\":\""     + jsonw::esc(idLabel()) + "\",";
+    j += "\"model\":\""  + jsonw::esc(modelDisplay()) + "\",";
+    j += "\"ip\":\""     + jsonw::esc(ipUtf8()) + "\",";
+    j += "\"online\":"  + std::string(jsonw::boolStr(s.online)) + ",";
+    j += "\"rec\":"     + std::string(jsonw::boolStr(s.rec)) + ",";
+    j += "\"battery\":" + jsonw::numOrNull(s.battery) + ",";
+    j += "\"acPower\":" + std::string(jsonw::boolStr(s.acPower)) + ",";
+    j += "\"cardMinutes\":" + jsonw::numOrNull(s.cardMinutes) + ",";
+    j += "\"writing\":" + std::string(jsonw::boolStr(s.writing)) + ",";
+    // Перегрев по данным камеры: null = не сообщает, 0 норма, 1 близко, 2 перегрев.
+    j += "\"overheat\":" + jsonw::numOrNull(s.overheat) + ",";
+    j += "\"iso\":"     + (s.iso.empty() ? std::string("null") : "\"" + jsonw::esc(s.iso) + "\"") + ",";
+    j += "\"isoEff\":"  + jsonw::numOrNull(s.isoEff) + ",";
+    j += "\"isoOpts\":" + propOptsJson(s.isoOpts) + ",";
+    j += "\"aperture\":" + propOptsJson(s.aperture) + ",";
+    j += "\"shutter\":"  + propOptsJson(s.shutter) + ",";
+    j += "\"wb\":"       + propOptsJson(s.wb) + ",";
+    j += "\"wbKelvin\":" + jsonw::numOrNull(s.wbKelvin) + ",";
+    j += "\"wbKelvinRw\":" + std::string(jsonw::boolStr(s.wbKelvinWritable)) + ",";
+    j += "\"wbKelvinRange\":" + ((s.wbKelvinMin < 0 || s.wbKelvinMax < 0)
+             ? std::string("null")
+             : "[" + std::to_string(s.wbKelvinMin) + "," + std::to_string(s.wbKelvinMax) +
+               "," + std::to_string(s.wbKelvinStep) + "]") + ",";
+    j += "\"micGain\":"  + propOptsJson(s.micGain);
+    j += "}";
+    return j;
+}
+
+// Действия, которые понимает камера Sony. Незнакомое — false и строка в лог:
+// панель может оказаться новее программы, и это не повод падать.
+bool CameraSession::command(const std::string& action, const std::string& value) {
+    if (action == "rec")       return setRec(value == "start");
+    if (action == "iso")       return setIso(value);
+    if (action == "aperture")  return setAperture(value);
+    if (action == "shutter")   return setShutter(value);
+    if (action == "wb")        return setWb(value);
+    if (action == "wbkelvin")  return setWbKelvin(value);
+    if (action == "micgain")   return setMicGain(value);
+    clog("[%s] действие «%s» эта камера не умеет.\n", idLabel().c_str(), action.c_str());
+    return false;
 }
 
 } // namespace coll

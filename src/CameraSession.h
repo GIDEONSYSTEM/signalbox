@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "ICamera.h"
+
 #include "CameraRemote_SDK.h"
 #include "IDeviceCallback.h"
 #include "ICrCameraObjectInfo.h"
@@ -64,7 +66,9 @@ struct CamStatus {
     CamPropOpts micGain;            // уровень записи микрофона (AudioInputMasterLevel, 0..31)
 };
 
-class CameraSession : public SCRSDK::IDeviceCallback {
+// Реализует cam::ICamera: main.cpp работает с камерами только через него и про
+// Sony SDK не знает. Всё, что ниже помечено override, — общая часть для всех марок.
+class CameraSession : public SCRSDK::IDeviceCallback, public cam::ICamera {
 public:
     CameraSession(int index, const SCRSDK::ICrCameraObjectInfo* enumInfo);
     ~CameraSession();
@@ -78,23 +82,38 @@ public:
     // attempt failed or the pairing dialog was not confirmed). No-op once the
     // camera has connected at least once (then CrReconnecting handles drops).
     // Returns true if it actually issued a Connect this call (so the caller can
-    // serialize handshakes by spacing attempts out).
-    bool maybeRetryConnect();
+    // serialize handshakes by spacing attempts out). — объявлен как override ниже.
     // Block up to timeoutMs waiting for OnConnected. Returns connected state.
     bool waitConnected(int timeoutMs);
     bool isConnected() const { return m_connected.load(); }
     // Last polled recording state (cached, lock-free) — used by the global hotkey.
     bool cachedRecording() const { return m_recCached.load(); }
     // Graceful shutdown in two phases so every camera disconnects in parallel:
-    void beginDisconnect();   // ask the camera to disconnect (async, no release)
-    void finishRelease();     // release the device handle (after all are down)
+    // beginDisconnect() / finishRelease() — объявлены как override ниже.
 
-    int          index()   const { return m_index; }
-    std::string  idLabel() const;            // "CAM 1"
-    std::string  modelUtf8() const;          // e.g. "ZV-E1"
+    int          index()   const override { return m_index; }
+    std::string  idLabel() const override;   // "CAM 1"
+    std::string  modelUtf8() const;          // сырое имя из SDK, e.g. "ZV-E10M2"
     std::string  ipUtf8()  const;
     std::string  macUtf8() const;
     unsigned int lastError() const { return m_lastError.load(); }
+
+    // ---- cam::ICamera ----
+    // Ключ Sony-камеры — её IP: именно он лежит в groups.json с самого начала,
+    // поэтому переход на ключи не требует миграции файла групп.
+    cam::Vendor  vendor()       const override { return cam::Vendor::Sony; }
+    std::string  key()          const override { return ipUtf8(); }
+    std::string  modelDisplay() const override;
+    std::string  address()      const override { return ipUtf8(); }
+    std::string  hwId()         const override { return macUtf8(); }
+    bool         connected()    const override { return m_connected.load(); }
+    bool         recording()    const override { return m_recCached.load(); }
+    std::string  statusJson()             override;
+    bool         command(const std::string& action, const std::string& value) override;
+    bool         maybeRetryConnect()      override;
+    void         beginDisconnect()        override;
+    void         finishRelease()          override;
+    bool         grabLiveView(std::string& jpegOut, std::string& framesJson) override;
 
     // Query live status from the camera (safe to call from poll thread).
     CamStatus readStatus();
@@ -111,7 +130,7 @@ public:
 
     // Live view (on-demand). jpegOut = latest JPEG; framesJson = focus/face/tracking
     // frame rectangles (normalized). Returns false if a frame isn't ready yet.
-    bool grabLiveView(std::string& jpegOut, std::string& framesJson);
+    // — объявлен как override выше.
 
     // ---- IDeviceCallback ---- (defined in .cpp so they can log)
     void OnConnected(SCRSDK::DeviceConnectionVersioin version) override;

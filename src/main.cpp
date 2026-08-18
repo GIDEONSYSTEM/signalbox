@@ -15,6 +15,7 @@
 
 #include "HttpServer.h"
 #include "CameraSession.h"
+#include "ICamera.h"
 #include "UpdateAsset.h"       // выбор архива релиза под свою ОС (прогоняется тестом)
 #include "platform/Platform.h" // всё, что зависит от ОС, — только через этот слой
 
@@ -46,7 +47,7 @@ using coll::CamStatus;
 // g_cams only ever grows (cameras are added by discovery, never removed until
 // shutdown), so a CameraSession* stays valid for the process lifetime even
 // after the vector reallocates — readers copy raw pointers under a short lock.
-static std::vector<std::unique_ptr<CameraSession>> g_cams;
+static std::vector<std::unique_ptr<cam::ICamera>>   g_cams;
 static std::mutex                                  g_camsMutex;    // guards g_cams structure
 static std::mutex                                  g_statusMutex;  // guards g_statusJson
 static std::string                                 g_statusJson = "{\"cameras\":[]}";
@@ -654,29 +655,10 @@ static bool readFileBinary(const std::string& full, std::string& out) {
     return plat::readFile(full, out);
 }
 
-// Map raw SDK model names to friendly display names.
-static std::string friendlyModel(const std::string& m) {
-    if (m == "ZV-E10M2") return "ZV-E10 II";   // SDK reports it as "ZV-E10M2"
-    return m;
-}
-
-// Serialize a selectable property: {"cur":N|null,"opts":[[enc,"label"],...],"rw":bool}.
-// rw — можно ли менять свойство прямо сейчас (камера сообщает это сама). Панель
-// по нему гасит контрол, вместо того чтобы предлагать menять то, что не меняется.
-static std::string propOptsJson(const coll::CamPropOpts& p) {
-    std::string j = "{\"cur\":" + (p.cur < 0 ? std::string("null") : std::to_string(p.cur)) + ",\"opts\":[";
-    for (size_t k = 0; k < p.opts.size(); ++k) {
-        if (k) j += ",";
-        j += "[" + std::to_string(p.opts[k].first) + ",\"" + jsonEscape(p.opts[k].second) + "\"]";
-    }
-    j += "],\"rw\":" + std::string(p.writable ? "true" : "false") + "}";
-    return j;
-}
-
 // Build /status.json from the live cameras (dynamic count). Reads each camera's
 // status fresh. Called by the poll thread once a second.
 static std::string buildStatusJson() {
-    std::vector<CameraSession*> cams;
+    std::vector<cam::ICamera*> cams;
     { std::lock_guard<std::mutex> lk(g_camsMutex);
       cams.reserve(g_cams.size());
       for (auto& c : g_cams) cams.push_back(c.get()); }
@@ -689,37 +671,8 @@ static std::string buildStatusJson() {
 
     std::string j = "{\"server\":\"" + server + "\",\"cameras\":[";
     for (size_t i = 0; i < cams.size(); ++i) {
-        CamStatus s = cams[i]->readStatus();
         if (i) j += ",";
-        j += "{";
-        j += "\"id\":\""    + jsonEscape(cams[i]->idLabel()) + "\",";
-        j += "\"model\":\"" + jsonEscape(friendlyModel(cams[i]->modelUtf8())) + "\",";
-        j += "\"ip\":\""    + jsonEscape(cams[i]->ipUtf8()) + "\",";
-        j += "\"online\":"  + std::string(s.online ? "true" : "false") + ",";
-        j += "\"rec\":"     + std::string(s.rec ? "true" : "false") + ",";
-        j += "\"battery\":" + (s.battery < 0 ? std::string("null") : std::to_string(s.battery)) + ",";
-        j += "\"acPower\":" + std::string(s.acPower ? "true" : "false") + ",";
-        j += "\"cardMinutes\":" + (s.cardMinutes < 0 ? std::string("null") : std::to_string(s.cardMinutes)) + ",";
-        j += "\"writing\":" + std::string(s.writing ? "true" : "false") + ",";
-        // Перегрев по данным камеры: null = не сообщает, 0 норма, 1 близко, 2 перегрев.
-        j += "\"overheat\":" + (s.overheat < 0 ? std::string("null") : std::to_string(s.overheat)) + ",";
-        j += "\"iso\":"     + (s.iso.empty() ? std::string("null") : "\"" + jsonEscape(s.iso) + "\"") + ",";
-        j += "\"isoEff\":"  + (s.isoEff < 0 ? std::string("null") : std::to_string(s.isoEff)) + ",";
-        // Список ISO самой камеры: панель больше не гадает по зашитой таблице.
-        j += "\"isoOpts\":" + propOptsJson(s.isoOpts) + ",";
-        j += "\"aperture\":" + propOptsJson(s.aperture) + ",";
-        j += "\"shutter\":"  + propOptsJson(s.shutter) + ",";
-        j += "\"wb\":"       + propOptsJson(s.wb) + ",";
-        j += "\"wbKelvin\":" + (s.wbKelvin < 0 ? std::string("null") : std::to_string(s.wbKelvin)) + ",";
-        // Диапазон цвет. температуры как его объявила камера: [min, max, шаг].
-        // null — камера диапазон не отдала, панель тогда покажет своё старое поведение.
-        j += "\"wbKelvinRw\":" + std::string(s.wbKelvinWritable ? "true" : "false") + ",";
-        j += "\"wbKelvinRange\":" + ((s.wbKelvinMin < 0 || s.wbKelvinMax < 0)
-                 ? std::string("null")
-                 : "[" + std::to_string(s.wbKelvinMin) + "," + std::to_string(s.wbKelvinMax) +
-                   "," + std::to_string(s.wbKelvinStep) + "]") + ",";
-        j += "\"micGain\":"  + propOptsJson(s.micGain);
-        j += "}";
+        j += cams[i]->statusJson();   // форма фрагмента — дело самой марки
     }
     j += "]}";
     return j;
@@ -995,7 +948,7 @@ static void addManualCamsOnce(bool announce) {
         {
             std::lock_guard<std::mutex> lk(g_camsMutex);
             bool exists = false;
-            for (auto& c : g_cams) if (c->ipUtf8() == mc.ip) { exists = true; break; }
+            for (auto& c : g_cams) if (c->address() == mc.ip) { exists = true; break; }
             if (exists) continue;
         }
 
@@ -1019,7 +972,7 @@ static void addManualCamsOnce(bool announce) {
             std::lock_guard<std::mutex> lk(g_camsMutex);
             int idx = static_cast<int>(g_cams.size()) + 1;
             auto cam = std::make_unique<CameraSession>(idx, info);
-            fm = friendlyModel(cam->modelUtf8());
+            fm = cam->modelDisplay();
             g_cams.push_back(std::move(cam));
         }
         info->Release();
@@ -1133,8 +1086,8 @@ static void reconnectKnownOnce(bool announce) {
             std::lock_guard<std::mutex> lk(g_camsMutex);
             bool have = false;
             for (auto& c : g_cams) {
-                const std::string cm = normMac(c->macUtf8());
-                if ((!cm.empty() && cm == normMac(k.mac)) || c->ipUtf8() == k.ip) { have = true; break; }
+                const std::string cm = normMac(c->hwId());
+                if ((!cm.empty() && cm == normMac(k.mac)) || c->address() == k.ip) { have = true; break; }
             }
             if (have) continue;
         }
@@ -1179,7 +1132,7 @@ static void reconnectKnownOnce(bool announce) {
             std::lock_guard<std::mutex> lk(g_camsMutex);
             int idx = static_cast<int>(g_cams.size()) + 1;
             auto cam = std::make_unique<CameraSession>(idx, info);
-            fm = friendlyModel(cam->modelUtf8());
+            fm = cam->modelDisplay();
             g_cams.push_back(std::move(cam));
         }
         info->Release();
@@ -1214,7 +1167,7 @@ static bool writeGroupsJson(const std::string& json) {
 
 // определены ниже по файлу — нужны здесь, в разборе групп и в HTTP-обработчике
 static bool jsonGetStringArray(const std::string&, const std::string&, std::vector<std::string>&);
-static std::vector<CameraSession*> resolveTargetsByIp(const std::vector<std::string>&);
+static std::vector<cam::ICamera*> resolveTargetsByKey(const std::vector<std::string>&);
 static std::string midiLastJson();
 
 // ---------------- привязки: горячая клавиша и MIDI-кнопка на группу ----------------
@@ -1326,17 +1279,17 @@ static void reloadBindings() {
 // останавливает, иначе запускает. Так одна кнопка работает и на старт, и на
 // стоп, и не нужно занимать на пульте две.
 static void toggleRecGroup(const GroupBinding& g, const char* src) {
-    auto targets = resolveTargetsByIp(g.cams);
+    auto targets = resolveTargetsByKey(g.cams);
     if (targets.empty()) {
         consolePrintf("[%s] Группа «%s»: подключённых камер нет.\n", src, g.name.c_str());
         return;
     }
     bool anyRec = false;
-    for (CameraSession* c : targets)
-        if (c->isConnected() && c->cachedRecording()) { anyRec = true; break; }
+    for (cam::ICamera* c : targets)
+        if (c->connected() && c->recording()) { anyRec = true; break; }
     const bool start = !anyRec;
     int ok = 0;
-    for (CameraSession* c : targets) if (c->setRec(start)) ++ok;
+    for (cam::ICamera* c : targets) if (c->command("rec", start ? "start" : "stop")) ++ok;
     consolePrintf("[%s] Группа «%s»: %s записи, отправлено %d из %zu.\n",
                   src, g.name.c_str(), start ? "старт" : "стоп", ok, targets.size());
 }
@@ -1462,13 +1415,13 @@ static void discoverOnce(bool announce) {
             std::lock_guard<std::mutex> lk(g_camsMutex);
             bool exists = false;
             for (auto& c : g_cams) {
-                std::string k = c->macUtf8().empty() ? c->ipUtf8() : c->macUtf8();
+                std::string k = c->hwId().empty() ? c->address() : c->hwId();
                 if (!keyNew.empty() && k == keyNew) { exists = true; break; }
             }
             if (exists) continue;
             int idx = static_cast<int>(g_cams.size()) + 1;
             auto cam = std::make_unique<CameraSession>(idx, info);
-            fm = friendlyModel(cam->modelUtf8());
+            fm = cam->modelDisplay();
             where = ip.empty() ? mac : ip;
             g_cams.push_back(std::move(cam));
             addedNew = true;
@@ -1492,8 +1445,8 @@ static void maybePrintCamSummary() {
     {
         std::lock_guard<std::mutex> lk(g_camsMutex);
         for (auto& c : g_cams) {
-            std::string where = c->ipUtf8().empty() ? c->macUtf8() : c->ipUtf8();
-            rows.push_back({ c->index(), friendlyModel(c->modelUtf8()), where, c->isConnected() });
+            std::string where = c->address().empty() ? c->hwId() : c->address();
+            rows.push_back({ c->index(), c->modelDisplay(), where, c->connected() });
         }
     }
     if (rows.empty()) return;
@@ -1542,8 +1495,8 @@ static bool jsonGetStringArray(const std::string& body, const std::string& key,
 }
 
 // Resolve which cameras a /cmd targets ("all" or a 1-based number).
-static std::vector<CameraSession*> resolveTargets(const std::string& camStr) {
-    std::vector<CameraSession*> out;
+static std::vector<cam::ICamera*> resolveTargets(const std::string& camStr) {
+    std::vector<cam::ICamera*> out;
     std::lock_guard<std::mutex> lk(g_camsMutex);
     if (camStr == "all" || camStr == "\"all\"") {
         for (auto& c : g_cams) out.push_back(c.get());
@@ -1554,15 +1507,17 @@ static std::vector<CameraSession*> resolveTargets(const std::string& camStr) {
     return out;
 }
 
-// Group targeting: a list of camera IPs (stable across restarts, unlike "CAM N",
+// Group targeting: a list of camera KEYS (stable across restarts, unlike "CAM N",
 // which is assigned in discovery order). One request for the whole group so a
 // group REC starts every camera in the same pass instead of one HTTP call each.
-static std::vector<CameraSession*> resolveTargetsByIp(const std::vector<std::string>& ips) {
-    std::vector<CameraSession*> out;
+// Ключ камеры Sony — её IP, поэтому groups.json, написанные до появления второго
+// вендора, продолжают работать без миграции: там уже лежат ключи.
+static std::vector<cam::ICamera*> resolveTargetsByKey(const std::vector<std::string>& keys) {
+    std::vector<cam::ICamera*> out;
     std::lock_guard<std::mutex> lk(g_camsMutex);
-    for (const std::string& ip : ips)
+    for (const std::string& k : keys)
         for (auto& c : g_cams)
-            if (c->ipUtf8() == ip) { out.push_back(c.get()); break; }
+            if (c->key() == k) { out.push_back(c.get()); break; }
     return out;
 }
 
@@ -1580,33 +1535,17 @@ static coll::HttpResponse handleCmd(const std::string& body) {
     }
     jsonGet(body, "value", value);
 
-    auto targets = byIps ? resolveTargetsByIp(camIps) : resolveTargets(camStr);
+    auto targets = byIps ? resolveTargetsByKey(camIps) : resolveTargets(camStr);
     if (targets.empty()) {
         r.status = 404; r.statusText = "Not Found";
         r.body = "{\"ok\":false,\"error\":\"camera not found\"}";
         return r;
     }
 
+    // Набор действий знает сама камера: у разных марок он разный.
     int okCount = 0;
-    for (CameraSession* c : targets) {
-        bool ok = false;
-        if (action == "rec")            ok = c->setRec(value == "start");
-        else if (action == "iso")       ok = c->setIso(value);
-        else if (action == "aperture")  ok = c->setAperture(value);
-        else if (action == "shutter")   ok = c->setShutter(value);
-        else if (action == "wb")        ok = c->setWb(value);
-        else if (action == "wbkelvin")  ok = c->setWbKelvin(value);
-        else if (action == "micgain")   ok = c->setMicGain(value);
-        if (ok) ++okCount;
-    }
-
-    if (action != "rec" && action != "iso" &&
-        action != "aperture" && action != "shutter" && action != "wb" &&
-        action != "wbkelvin" && action != "micgain") {
-        r.status = 400; r.statusText = "Bad Request";
-        r.body = "{\"ok\":false,\"error\":\"unknown action\"}";
-        return r;
-    }
+    for (cam::ICamera* c : targets)
+        if (c->command(action, value)) ++okCount;
 
     r.body = "{\"ok\":" + std::string(okCount > 0 ? "true" : "false") +
              ",\"applied\":" + std::to_string(okCount) + "}";
@@ -1887,12 +1826,12 @@ static void liveViewWorker() {
     const auto      frameGap = std::chrono::milliseconds(5);   // не ограничиваем, только уступаем CPU
     while (g_running.load()) {
         auto t0 = std::chrono::steady_clock::now();
-        std::vector<CameraSession*> cams;
+        std::vector<cam::ICamera*> cams;
         { std::lock_guard<std::mutex> lk(g_camsMutex);
           for (auto& c : g_cams) cams.push_back(c.get()); }
         long long now = nowSteadyMs();
-        for (CameraSession* c : cams) {
-            if (!c->isConnected()) continue;
+        for (cam::ICamera* c : cams) {
+            if (!c->connected()) continue;
             bool active;
             { std::lock_guard<std::mutex> lk(g_lvMutex);
               auto it = g_lvActiveMs.find(c->index());
@@ -2031,7 +1970,7 @@ int main() {
             discoverOnce(true);
             addManualCamsOnce(true);      // cameras.txt: networks that block discovery
             reconnectKnownOnce(true);     // ранее найденные — по сохранённому адресу
-            std::vector<CameraSession*> cams;
+            std::vector<cam::ICamera*> cams;
             { std::lock_guard<std::mutex> lk(g_camsMutex);
               for (auto& c : g_cams) cams.push_back(c.get()); }
             for (auto* c : cams) {
@@ -2145,7 +2084,7 @@ int main() {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
         while (std::chrono::steady_clock::now() < deadline) {
             bool any = false;
-            for (auto& c : g_cams) if (c->isConnected()) { any = true; break; }
+            for (auto& c : g_cams) if (c->connected()) { any = true; break; }
             if (!any) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
