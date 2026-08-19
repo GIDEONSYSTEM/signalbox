@@ -1342,7 +1342,16 @@ let groups = [];
 const BMD_WB_STEP = 100;      // шаг подкрутки кельвинов, значение шлём числом
 const BMD_TINT_STEP = 1;
 
-function bmdShutterLabel(v){ return '1/' + v; }
+/* Выдержку камера показывает ЛИБО скоростью (1/50), ЛИБО углом затвора
+   (18000 = 180°) — режим у каждой камеры свой, он приходит в shutterMeasurement.
+   Угол хранится умноженным на 100, поэтому делим и убираем лишний ноль. */
+function bmdShutterLabel(v, meas){
+  if(meas === 'ShutterAngle'){
+    const d = Number(v) / 100;
+    return (Number.isInteger(d) ? d : d.toFixed(1)) + '°';
+  }
+  return '1/' + v;
+}
 
 /* Камера отдаёт таймкод как ЧЧ:ММ:СС:КК, где последняя группа — номер кадра
    (0..24 при 25p), а не миллисекунды. Оператору она не нужна: показываем ЧЧ:ММ:СС.
@@ -1478,7 +1487,12 @@ function updateBmdCard(e, d){
 
   // Списки — ровно те, что прислала камера.
   fillSelect(e.isoSel, (d.isoOpts||[]).map(v=>[v,String(v)]), desired(e,'iso',d.iso), null, true);
-  fillSelect(e.shSel,  (d.shutterOpts||[]).map(v=>[v,bmdShutterLabel(v)]), desired(e,'shutter',d.shutter), null, true);
+  const shMeas = d.shutterMeasurement || 'ShutterSpeed';
+  fillSelect(e.shSel,  (d.shutterOpts||[]).map(v=>[v,bmdShutterLabel(v,shMeas)]), desired(e,'shutter',d.shutter), null, true);
+  // Подпись контрола показывает, в чём камера считает выдержку — иначе «180»
+  // рядом с «1/50» у соседней камеры выглядит ошибкой.
+  const shLab = e.card.querySelectorAll('.controls .ctl')[1].querySelector('.ctl-lab');
+  if(shLab) shLab.textContent = (shMeas === 'ShutterAngle') ? 'Shutter °' : 'Shutter';
   fillSelect(e.gSel,   (d.gainOpts||[]).map(v=>[v,(v>0?'+':'')+v+' dB']), desired(e,'gain',d.gain), null, true);
   toggleSteps(e.card.querySelector('.iso-minus'), e.card.querySelector('.iso-plus'), e.isoSel);
   toggleSteps(e.card.querySelector('.sh-minus'),  e.card.querySelector('.sh-plus'),  e.shSel);

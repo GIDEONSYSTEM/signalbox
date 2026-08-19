@@ -70,6 +70,7 @@ private:
     void pollLoop();
     void pollOnce(bool full);          // снимок состояния обычным REST
     void rebuildCache();               // собрать фрагмент /status.json из полей
+    void readSupportedLists();         // допустимые значения и диапазоны — с камеры
     bool openWs();                     // подключиться и подписаться
     // Что изменилось после разбора события подписки. Таймкод выделен отдельно:
     // он приходит ~12 раз в секунду, и пересобирать из-за него /status.json так
@@ -126,7 +127,11 @@ private:
         double      iris = -1.0;
         bool        irisControllable = false;
         // Допустимые значения отдаёт САМА камера — зашитых таблиц нет (§10.0.1).
-        std::vector<long long> isoOpts, gainOpts, shutterOpts;
+        std::vector<long long> isoOpts, gainOpts;
+        // Выдержку камера показывает ЛИБО скоростью (1/50), ЛИБО углом (180°) —
+        // режим у каждой камеры свой, поэтому храним оба списка и отдаём тот,
+        // что соответствует текущему режиму.
+        std::vector<long long> shutterSpeedOpts, shutterAngleOpts;
         long long   wbMin = -1, wbMax = -1, tintMin = 0, tintMax = 0;
         std::string autoExposure;
     };
@@ -148,6 +153,9 @@ private:
     // ⚠️ Сверку тоже нельзя гнать на каждом событии: три попытки уложились бы в
     // четверть секунды, и мы бы сдались раньше, чем камера успела применить.
     std::chrono::steady_clock::time_point m_lastReconcile{};
+    // Формат сменился — списки допустимых выдержек зависят от частоты кадров,
+    // поэтому их надо перечитать, не дожидаясь переподключения.
+    bool               m_listsStale = false;
 
     std::atomic<bool>  m_run{true};
     std::thread        m_thread;

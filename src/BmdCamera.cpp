@@ -185,7 +185,17 @@ BmdCamera::Change BmdCamera::applyEvent(const std::string& m) {
     setNum("gain", m_slow.gain);
     setNum("whiteBalance", m_slow.wb);
     setNum("whiteBalanceTint", m_slow.tint);
-    setNum("shutterSpeed", m_slow.shutter);
+    // Какое поле пришло — в таком режиме камера и стоит. Это самоисправляется:
+    // переключили режим на тушке — узнаем из первого же события.
+    {
+        const long long spd = jsonr::num(m, "shutterSpeed", LLONG_MIN);
+        const long long ang = jsonr::num(m, "shutterAngle", LLONG_MIN);
+        if (spd != LLONG_MIN && (spd != m_slow.shutter || m_slow.shutterMeas != "ShutterSpeed")) {
+            m_slow.shutter = spd; m_slow.shutterMeas = "ShutterSpeed"; other = true;
+        } else if (ang != LLONG_MIN && (ang != m_slow.shutter || m_slow.shutterMeas != "ShutterAngle")) {
+            m_slow.shutter = ang; m_slow.shutterMeas = "ShutterAngle"; other = true;
+        }
+    }
     setNum("milliVolt", m_slow.milliVolt);
     if (m.find("\"source\"") != std::string::npos) {
         const std::string v = jsonr::str(m, "source");
@@ -196,6 +206,8 @@ BmdCamera::Change BmdCamera::applyEvent(const std::string& m) {
         if (!v.empty() && v != m_slow.tally) { m_slow.tally = v; other = true; }
     }
     if (m.find("\"codec\"") != std::string::npos) {
+        // Набор допустимых выдержек зависит от частоты кадров — перечитать.
+        m_listsStale = true;
         m_slow.codec = jsonr::str(m, "codec");
         m_slow.fps   = jsonr::str(m, "frameRate");
         m_slow.w     = jsonr::numIn(m, "recordResolution", "width");
@@ -233,7 +245,14 @@ void BmdCamera::pollLoop() {
             { std::lock_guard<std::mutex> lk(m_pendMx); waiting = !m_pending.empty(); }
             pollOnce(waiting || restTick % kFullEvery == 0);
             ++restTick;
-            if (m_online.load()) m_wsReady = openWs();
+            if (m_online.load()) {
+                // 🔴 Списки читаются только в полном опросе, а он делается не
+                // каждый проход. Если камера появилась на «неполном» такте, мы
+                // уходили в подписку с пустыми списками и больше REST не звали —
+                // в панели ISO/выдержка/gain оставались недоступны навсегда.
+                if (m_slow.isoOpts.empty() || m_listsStale) readSupportedLists();
+                m_wsReady = openWs();
+            }
             if (!m_wsReady)
                 for (int k = 0; k < 10 && m_run.load(); ++k) std::this_thread::sleep_for(100ms);
             continue;
@@ -251,6 +270,7 @@ void BmdCamera::pollLoop() {
                 m_lastTcRebuild = now;                 // таймкод — не чаще, чем видит панель
                 rebuildCache();
             }
+            if (m_listsStale) { readSupportedLists(); rebuildCache(); }
             bool waiting;
             { std::lock_guard<std::mutex> lk(m_pendMx); waiting = !m_pending.empty(); }
             if (waiting && now - m_lastReconcile >= kReconcileInterval) {
@@ -331,25 +351,12 @@ void BmdCamera::pollOnce(bool full) {
         m_slow.gain  = jsonr::num(api("/video/gain").body, "gain");
         m_slow.wb    = jsonr::num(api("/video/whiteBalance").body, "whiteBalance");
         m_slow.tint  = jsonr::num(api("/video/whiteBalanceTint").body, "whiteBalanceTint");
-        const std::string sh = api("/video/shutter").body;
-        m_slow.shutter = jsonr::num(sh, "shutterSpeed");
-        m_slow.shutterMeas  = jsonr::str(api("/video/shutter/measurement").body, "measurement");
         const std::string iris = api("/lens/iris").body;
         bool f = false;
         m_slow.iris = jsonr::real(iris, "apertureStop", &f);
         if (!f) m_slow.iris = -1.0;
         m_slow.irisControllable = jsonr::boolean(api("/lens/iris/description").body, "controllable");
-        m_slow.autoExposure = jsonr::str(api("/video/autoExposure").body, "mode");
-        // Списки допустимых значений — только от камеры, никаких своих таблиц.
-        m_slow.isoOpts     = jsonr::numArray(api("/video/supportedISOs").body,  "supportedISOs");
-        m_slow.gainOpts    = jsonr::numArray(api("/video/supportedGains").body, "supportedGains");
-        m_slow.shutterOpts = jsonr::numArray(api("/video/supportedShutters").body, "shutterSpeeds");
-        const std::string wbd = api("/video/whiteBalance/description").body;
-        m_slow.wbMin = jsonr::numIn(wbd, "whiteBalance", "min");
-        m_slow.wbMax = jsonr::numIn(wbd, "whiteBalance", "max");
-        const std::string td = api("/video/whiteBalanceTint/description").body;
-        m_slow.tintMin = jsonr::numIn(td, "whiteBalanceTint", "min", 0);
-        m_slow.tintMax = jsonr::numIn(td, "whiteBalanceTint", "max", 0);
+        readSupportedLists();
     }
 
     rebuildCache();
@@ -358,6 +365,35 @@ void BmdCamera::pollOnce(bool full) {
 
 // Собрать фрагмент /status.json из текущих полей. Зовётся и после REST-опроса,
 // и после события подписки — форма одна, источник разный.
+// Допустимые значения спрашиваем у камеры: своих таблиц в программе нет (§10.0.1).
+void BmdCamera::readSupportedLists() {
+    std::string host; int port;
+    { std::lock_guard<std::mutex> lk(m_hostMx); host = m_host; port = m_port; }
+    if (host.empty()) return;
+    auto api = [&](const char* path) { return net::get(host, port, std::string(kApi) + path, 2500); };
+
+    m_slow.isoOpts  = jsonr::numArray(api("/video/supportedISOs").body,  "supportedISOs");
+    m_slow.gainOpts = jsonr::numArray(api("/video/supportedGains").body, "supportedGains");
+    const std::string sup = api("/video/supportedShutters").body;
+    m_slow.shutterSpeedOpts = jsonr::numArray(sup, "shutterSpeeds");
+    m_slow.shutterAngleOpts = jsonr::numArray(sup, "shutterAngles");
+    const std::string wbd = api("/video/whiteBalance/description").body;
+    m_slow.wbMin = jsonr::numIn(wbd, "whiteBalance", "min");
+    m_slow.wbMax = jsonr::numIn(wbd, "whiteBalance", "max");
+    const std::string td = api("/video/whiteBalanceTint/description").body;
+    m_slow.tintMin = jsonr::numIn(td, "whiteBalanceTint", "min", 0);
+    m_slow.tintMax = jsonr::numIn(td, "whiteBalanceTint", "max", 0);
+    m_slow.autoExposure = jsonr::str(api("/video/autoExposure").body, "mode");
+    m_slow.shutterMeas  = jsonr::str(api("/video/shutter/measurement").body, "measurement");
+    // Текущее значение выдержки — в том виде, в каком его показывает камера.
+    const std::string sh = api("/video/shutter").body;
+    const long long spd = jsonr::num(sh, "shutterSpeed", LLONG_MIN);
+    const long long ang = jsonr::num(sh, "shutterAngle", LLONG_MIN);
+    if      (spd != LLONG_MIN) { m_slow.shutter = spd; m_slow.shutterMeas = "ShutterSpeed"; }
+    else if (ang != LLONG_MIN) { m_slow.shutter = ang; m_slow.shutterMeas = "ShutterAngle"; }
+    m_listsStale = false;
+}
+
 void BmdCamera::rebuildCache() {
     // Фрагмент /status.json — СВОЙ, не сониевский: здесь нет перегрева и уровня
     // микрофона, зато есть таймкод, tally и питание. Панель ветвится по vendor.
@@ -404,7 +440,8 @@ void BmdCamera::rebuildCache() {
     };
     j += "\"isoOpts\":"     + arr(m_slow.isoOpts) + ",";
     j += "\"gainOpts\":"    + arr(m_slow.gainOpts) + ",";
-    j += "\"shutterOpts\":" + arr(m_slow.shutterOpts) + ",";
+    j += "\"shutterOpts\":" + arr(m_slow.shutterMeas == "ShutterAngle"
+             ? m_slow.shutterAngleOpts : m_slow.shutterSpeedOpts) + ",";
     j += "\"wbRange\":"     + ((m_slow.wbMin > 0 && m_slow.wbMax > 0)
              ? "[" + std::to_string(m_slow.wbMin) + "," + std::to_string(m_slow.wbMax) + "]"
              : std::string("null")) + ",";
@@ -454,7 +491,11 @@ void BmdCamera::reconcile() {
             else if (f == "gain")             cur = m_slow.gain;
             else if (f == "whiteBalance")     cur = m_slow.wb;
             else if (f == "whiteBalanceTint") cur = m_slow.tint;
-            else if (f == "shutterSpeed")     cur = m_slow.shutter;
+            // Выдержка лежит в одном поле независимо от режима, а имя записи
+            // зависит от него — сверять надо оба имени, иначе значение выглядит
+            // «неизвестным», и мы зря досылаем команду и жалуемся в лог.
+            else if (f == "shutterSpeed" ||
+                     f == "shutterAngle")     cur = m_slow.shutter;
 
             if (cur == it->second.want) { it = m_pending.erase(it); continue; }
             if (++it->second.tries > kSetRetries) {
@@ -485,7 +526,12 @@ bool BmdCamera::command(const std::string& action, const std::string& value) {
     if (action == "tint")     return writeNum("/video/whiteBalanceTint", "whiteBalanceTint", v);
     // Выдержка: пишем скоростью (1/N). У камеры есть и режим угла, приоритет по
     // спеке — shutterSpeed выше shutterAngle.
-    if (action == "shutter")  return writeNum("/video/shutter", "shutterSpeed", v);
+    if (action == "shutter") {
+        // Пишем тем же измерением, каким камера показывает: иначе значение либо
+        // не применится, либо применится не то (по спеке shutterSpeed важнее).
+        const bool angle = (m_slow.shutterMeas == "ShutterAngle");
+        return writeNum("/video/shutter", angle ? "shutterAngle" : "shutterSpeed", v);
+    }
     if (action == "rec") {
         blog("[BMD %s] запись пока не подключена (нужна проверка на камере с картой).\n",
              m_deviceName.c_str());
