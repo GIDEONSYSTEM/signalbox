@@ -15,7 +15,9 @@
 
 #include "HttpServer.h"
 #include "CameraSession.h"
+#include "BmdCamera.h"
 #include "ICamera.h"
+#include "net/MdnsBrowser.h"
 #include "UpdateAsset.h"       // выбор архива релиза под свою ОС (прогоняется тестом)
 #include "platform/Platform.h" // всё, что зависит от ОС, — только через этот слой
 
@@ -1438,6 +1440,52 @@ static void discoverOnce(bool announce) {
 // pairing confirmation on the camera body. Called from the discovery thread;
 // prints only when the connected-set changes, so it appears once at startup and
 // again each time a camera is paired/dropped.
+// ---------------- камеры Blackmagic (mDNS + REST) ----------------
+// Камеры BM анонсируют себя как _http._tcp.local, а в TXT анонса уже лежат
+// модель, прошивка и СТАБИЛЬНЫЙ unique id. Фильтруем по capabilities: на том же
+// типе сервиса в студии висят ATEM, свитчи и камеры наблюдения.
+// Адрес камеры может смениться (DHCP) — камера при этом та же, ключ тот же,
+// поэтому найденной камере просто обновляем адрес.
+static void discoverBmdOnce(bool announce) {
+    std::vector<mdns::Service> found;
+    found = mdns::browse("_http._tcp.local", 1200);
+
+    for (const mdns::Service& sv : found) {
+        auto cap = sv.txt.find("capabilities");
+        if (cap == sv.txt.end() || cap->second.find("cameraControl") == std::string::npos) continue;
+
+        auto get = [&](const char* k) -> std::string {
+            auto it = sv.txt.find(k);
+            return it == sv.txt.end() ? std::string() : it->second;
+        };
+        bmd::Found f;
+        f.uniqueId    = get("unique id");
+        f.productName = get("product name");
+        f.deviceName  = get("device name");
+        if (f.deviceName.empty()) f.deviceName = sv.instance;
+        f.host = sv.ip.empty() ? sv.host : sv.ip;   // адрес надёжнее имени .local
+        f.port = sv.port > 0 ? sv.port : 80;
+        if (f.uniqueId.empty() || f.host.empty()) continue;
+
+        const std::string key = "bmd:" + f.uniqueId;
+        std::lock_guard<std::mutex> lk(g_camsMutex);
+        bool exists = false;
+        for (auto& c : g_cams) {
+            if (c->key() != key) continue;
+            exists = true;
+            if (auto* b = dynamic_cast<bmd::BmdCamera*>(c.get())) b->updateHost(f.host, f.port);
+            break;
+        }
+        if (exists) continue;
+
+        const int idx = static_cast<int>(g_cams.size()) + 1;
+        g_cams.push_back(std::make_unique<bmd::BmdCamera>(idx, f));
+        if (announce)
+            consolePrintf("Камера Blackmagic: %s (%s, %s)\n",
+                          f.deviceName.c_str(), f.productName.c_str(), f.host.c_str());
+    }
+}
+
 static void maybePrintCamSummary() {
     static std::string s_lastSig;
     struct Row { int idx; std::string model; std::string where; bool conn; };
@@ -1862,6 +1910,7 @@ int main() {
     // сообщает о подключении и о подгонке значений, уходило в несуществующую
     // консоль (сборка без окна) и пропадало.
     coll::setLogSink([](const std::string& s) { writeConsoleUtf8(s); });
+    bmd::setLogSink([](const std::string& s) { writeConsoleUtf8(s); });
 
     // Work from the exe directory so the SDK finds Cr_Core.dll + CrAdapter/.
     plat::setWorkingDir(plat::exeDir());
@@ -1970,6 +2019,7 @@ int main() {
             discoverOnce(true);
             addManualCamsOnce(true);      // cameras.txt: networks that block discovery
             reconnectKnownOnce(true);     // ранее найденные — по сохранённому адресу
+            discoverBmdOnce(true);        // камеры Blackmagic по mDNS
             std::vector<cam::ICamera*> cams;
             { std::lock_guard<std::mutex> lk(g_camsMutex);
               for (auto& c : g_cams) cams.push_back(c.get()); }
