@@ -49,6 +49,16 @@ std::string apertureLabel(std::uint16_t f) {           // FNumber = F * 100
     std::snprintf(buf, sizeof(buf), "F%d", f / 100);
     return buf;
 }
+// Угол затвора: SDK отдаёт градусы, умноженные на 1000 (180000 = 180°).
+// Точка литеральная — на RU-локали %f напечатал бы запятую (§3).
+std::string shutterAngleLabel(std::uint32_t a) {
+    if (a == 0) return "";                              // CrShutterAngle_Disable
+    const unsigned whole = a / 1000, frac = (a % 1000) / 100;
+    char buf[24];
+    if (frac == 0) std::snprintf(buf, sizeof(buf), "%u\xC2\xB0", whole);
+    else           std::snprintf(buf, sizeof(buf), "%u.%u\xC2\xB0", whole, frac);
+    return buf;
+}
 std::string shutterLabel(std::uint32_t s) {            // hi = numerator, lo = denominator
     if (s == 0) return "BULB";
     if (s == 0xFFFFFFFFu) return "";
@@ -280,6 +290,7 @@ CamStatus CameraSession::readStatusLocked() {
         SDK::CrDevicePropertyCode::CrDeviceProperty_IsoCurrentSensitivity,
         SDK::CrDevicePropertyCode::CrDeviceProperty_FNumber,
         SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterSpeed,
+        SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterAngle,
         SDK::CrDevicePropertyCode::CrDeviceProperty_WhiteBalance,
         SDK::CrDevicePropertyCode::CrDeviceProperty_Colortemp,
         SDK::CrDevicePropertyCode::CrDeviceProperty_AudioInputMasterLevel,
@@ -387,7 +398,24 @@ CamStatus CameraSession::readStatusLocked() {
                         if (!l.empty()) s.aperture.opts.push_back({ arr[k], l }); } }
                 break;
             }
+            case SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterAngle: {
+                // Камера сама решает, в чём считает выдержку. Если угол пришёл и
+                // он не «выключен» — значит тушка стоит в угловом режиме, и
+                // показывать надо его, а не скорость.
+                const std::uint32_t a = static_cast<std::uint32_t>(val);
+                if (a == 0) break;                      // CrShutterAngle_Disable
+                CamPropOpts ang;
+                ang.cur = static_cast<long long>(a);
+                ang.writable = props[i].IsSetEnableCurrentValue();
+                const auto* arr = reinterpret_cast<const std::uint32_t*>(props[i].GetValues());
+                if (arr) { CrInt32u cnt = props[i].GetValueSize() / sizeof(std::uint32_t);
+                    for (CrInt32u k = 0; k < cnt; ++k) { std::string l = shutterAngleLabel(arr[k]);
+                        if (!l.empty()) ang.opts.push_back({ arr[k], l }); } }
+                if (!ang.opts.empty()) { s.shutter = std::move(ang); s.shutterIsAngle = true; }
+                break;
+            }
             case SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterSpeed: {
+                if (s.shutterIsAngle) break;            // угол уже пришёл — он главнее
                 s.shutter.cur = static_cast<long long>(static_cast<std::uint32_t>(val));
                 s.shutter.writable = props[i].IsSetEnableCurrentValue();
                 const auto* arr = reinterpret_cast<const std::uint32_t*>(props[i].GetValues());
@@ -563,6 +591,7 @@ void CameraSession::reconcileLocked(const CamStatus& s) {
         long long cur;
         switch (it->first) {
         case SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterSpeed:   cur = s.shutter.cur;  break;
+        case SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterAngle:   cur = s.shutter.cur;  break;
         case SDK::CrDevicePropertyCode::CrDeviceProperty_FNumber:        cur = s.aperture.cur; break;
         case SDK::CrDevicePropertyCode::CrDeviceProperty_IsoSensitivity: cur = s.isoOpts.cur;  break;
         default: it = m_pending.erase(it); continue;      // за остальным не следим
@@ -588,8 +617,13 @@ bool CameraSession::setAperture(const std::string& enc) {
                       SDK::CrDataType::CrDataType_UInt16Array);
 }
 bool CameraSession::setShutter(const std::string& enc) {
-    return setEncoded(SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterSpeed, enc,
-                      SDK::CrDataType::CrDataType_UInt32Array);
+    // Пишем тем же измерением, в каком камера показывает выдержку, иначе
+    // значение уйдёт не в то свойство и не применится.
+    bool angle = false;
+    { std::lock_guard<std::mutex> lk(m_io); angle = m_lastGood.shutterIsAngle; }
+    return setEncoded(angle ? SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterAngle
+                            : SDK::CrDevicePropertyCode::CrDeviceProperty_ShutterSpeed,
+                      enc, SDK::CrDataType::CrDataType_UInt32Array);
 }
 bool CameraSession::setWb(const std::string& enc) {
     return setEncoded(SDK::CrDevicePropertyCode::CrDeviceProperty_WhiteBalance, enc,
@@ -788,6 +822,8 @@ std::string CameraSession::statusJson() {
     j += "\"isoOpts\":" + propOptsJson(s.isoOpts) + ",";
     j += "\"aperture\":" + propOptsJson(s.aperture) + ",";
     j += "\"shutter\":"  + propOptsJson(s.shutter) + ",";
+    j += "\"shutterMeasurement\":\"" +
+         std::string(s.shutterIsAngle ? "ShutterAngle" : "ShutterSpeed") + "\",";
     j += "\"wb\":"       + propOptsJson(s.wb) + ",";
     j += "\"wbKelvin\":" + jsonw::numOrNull(s.wbKelvin) + ",";
     j += "\"wbKelvinRw\":" + std::string(jsonw::boolStr(s.wbKelvinWritable)) + ",";

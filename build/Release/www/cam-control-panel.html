@@ -1298,6 +1298,12 @@ function updateSonyCard(e, d){
   fillSelect(e.shSel, d.shutter && d.shutter.opts,
              desired(e, 'shutter', d.shutter && d.shutter.cur), fmtShutter,
              d.shutter && d.shutter.rw);
+  // Кинокамеры Sony умеют считать выдержку углом затвора; метки приходят уже
+  // готовыми ("180°"), но подпись контрола должна сказать, что это не скорость.
+  {
+    const lab = e.card.querySelectorAll('.controls .ctl')[1].querySelector('.ctl-lab');
+    if(lab) lab.textContent = (d.shutterMeasurement === 'ShutterAngle') ? 'Shutter °' : 'Shutter';
+  }
   toggleSteps(e.apMinus, e.apPlus, e.apSel);
   toggleSteps(e.shMinus, e.shPlus, e.shSel);
 

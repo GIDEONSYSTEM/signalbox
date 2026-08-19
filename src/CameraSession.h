@@ -54,7 +54,11 @@ struct CamStatus {
     // cur/значения — уже с наложенной маской 0x00FFFFFF (AUTO = 0xFFFFFF).
     CamPropOpts isoOpts;
     CamPropOpts aperture;           // FNumber (value = F*100)
-    CamPropOpts shutter;            // ShutterSpeed (hi=num, lo=den)
+    CamPropOpts shutter;            // активная выдержка: скорость ИЛИ угол — см. shutterIsAngle
+    // Кинокамеры Sony умеют показывать выдержку углом затвора вместо скорости
+    // (CrDeviceProperty_ShutterAngle, значение = градусы × 1000). Свойство есть
+    // не у всех тушек: ILCE-7SM3 его не отдаёт вовсе — там всегда скорость.
+    bool        shutterIsAngle = false;
     CamPropOpts wb;                 // WhiteBalance (mode enum)
     int         wbKelvin    = -1;   // текущая цвет. температура ББ, K (-1 = недоступно)
     // Диапазон цвет. температуры, как его объявляет камера: min/max/шаг. У ZV-E1
