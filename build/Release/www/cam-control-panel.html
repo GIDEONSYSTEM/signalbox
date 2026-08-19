@@ -314,6 +314,28 @@
   /* вторая строка регуляторов: Mic Gain · WB. Метрики общие с первой строкой
      (см. блок выше), здесь только раскладка колонками. */
   .controls2{display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px;}
+  /* ---- карточка Blackmagic ---- */
+  .bmd-name{font-size:11px; color:var(--ink); font-weight:600; white-space:nowrap;}
+  .bmd-tc{font-family:var(--mono); font-size:12px; color:var(--ink); white-space:nowrap; margin-left:auto;}
+  .bmd-pw{font-size:11px; color:var(--ink-dim); white-space:nowrap; margin-left:auto;}
+  /* Название модели не ужимаем: оно и есть главный опознавательный признак. */
+  .card .ctop .cam{flex:0 0 auto;}
+  .bmd-fmt{display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:7px 0 8px;
+           font-size:11px; color:var(--ink-dim);}
+  .bmd-fmt b{font-weight:600; color:var(--ink); font-family:var(--mono);}
+  /* Значение непрерывного параметра (ББ, tint): камера отдаёт диапазон, а не
+     список, поэтому здесь не селектор, а «− значение +» — своих таблиц не выдумываем. */
+  .bmd-val{flex:1 1 auto; min-width:0; text-align:center; font-size:13px; color:var(--ink);
+           font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .bmd-tally{font-size:10px; letter-spacing:.06em; text-transform:uppercase; padding:1px 5px;
+             border-radius:4px; border:1px solid var(--edge); color:var(--idle); white-space:nowrap;}
+  .bmd-tally.prev{color:var(--ok); border-color:rgba(65,214,126,.5);}
+  .bmd-tally.prog{color:var(--crit); border-color:rgba(255,77,77,.5);}
+  .bmd-off{display:none; margin-top:9px; padding:8px 10px; border-radius:8px; font-size:11px; line-height:1.5;
+           background:rgba(255,170,0,.08); border:1px solid rgba(255,170,0,.35); color:var(--warn, #ffaa00);}
+  .card.api-off .bmd-off{display:block;}
+  .card.api-off .controls, .card.api-off .controls2, .card.api-off .bmd-fmt{opacity:.35; pointer-events:none;}
+  .card.api-off .rec-btn, .card.api-off .bmd-tc, .card.api-off .bmd-tally{opacity:.35;}
   .ctl{display:flex; flex-direction:column; gap:3px; min-width:0;}
   /* line-height и nowrap — те же, что у подписи первого ряда: без этого строки
      подписей разной высоты и ряды не сходятся по вертикали */
@@ -934,6 +956,15 @@ function lvStop(e){
 
 /* ---------- построение карточки ---------- */
 function buildCard(cam){
+  // Карточки марок РАЗНЫЕ: у камер разный набор свойств, и общий знаменатель
+  // означал бы натянуть чужую модель на одну из них (решение владельца).
+  return (cam.vendor === 'bmd') ? buildBmdCard(cam) : buildSonyCard(cam);
+}
+function updateCard(e, d){
+  return (d.vendor === 'bmd') ? updateBmdCard(e, d) : updateSonyCard(e, d);
+}
+
+function buildSonyCard(cam){
   const camNum = parseInt(String(cam.id).replace(/\D/g,''),10);
   const card = document.createElement('div');
   card.className = 'card';
@@ -1093,13 +1124,13 @@ function buildCard(cam){
     e.card.classList.remove('overheat-alert');
   };
   // ---- группы: карточку можно перетащить; селектор — запасной путь для тача ----
-  e.ip = cam.ip || '';
+  e.key = cam.key || cam.ip || '';
   card.draggable = true;
   card.addEventListener('dragstart', ev=>{
     // не перехватывать перетаскивание, начатое на органах управления
     if(ev.target.closest('select,input,button,.rec-btn,.step,.lv')){ ev.preventDefault(); return; }
-    if(!e.ip){ ev.preventDefault(); return; }
-    ev.dataTransfer.setData('text/plain', e.ip);
+    if(!e.key){ ev.preventDefault(); return; }
+    ev.dataTransfer.setData('text/plain', e.key);
     ev.dataTransfer.effectAllowed = 'move';
     card.classList.add('dragging');
   });
@@ -1110,7 +1141,7 @@ function buildCard(cam){
   card.querySelector('.controls').before(grpRow);
   e.grpRow = grpRow;
   e.grpSel = grpRow.querySelector('select');
-  e.grpSel.onchange = ()=>moveCam(e.ip, e.grpSel.value);
+  e.grpSel.onchange = ()=>moveCam(e.key, e.grpSel.value);
 
   cards[cam.id] = e;
   return e;
@@ -1187,12 +1218,12 @@ function fillSelect(sel, opts, cur, fmt, writable){
 }
 
 /* ---------- обновление карточки из данных камеры ---------- */
-function updateCard(e, d){
+function updateSonyCard(e, d){
   e.last = d;              // последний снимок — из него считаются шаги для группы
   // IP обязательно обновлять: карточки живут по ключу «CAM N», а он выдаётся
   // в порядке обнаружения и между запусками может достаться другой камере.
   // Со старым IP карточка уехала бы в чужую группу.
-  if(d.ip) e.ip = d.ip;
+  if(d.key) e.key = d.key;
   // Перегрев. Состояние приходит от камеры: 0 норма, 1 близко к пределу,
   // 2 перегрев.
   // 🔴 Оповещение на всю карточку показываем УЖЕ ПРИ 1. Проверено на живой
@@ -1298,6 +1329,147 @@ let groups = [];
 /* Свёрнутые группы храним ЛОКАЛЬНО в браузере, а не в groups.json: у каждого
    оператора свой телефон и свой зал — свернув чужие залы у себя, он не должен
    схлопывать их в доке OBS и у соседей. */
+/* ================= карточка Blackmagic =================
+   Своя, не сониевская: у PYXIS нет ни перегрева, ни уровня микрофона, зато есть
+   таймкод, tally и питание в вольтах. Списки ISO/выдержек/gain приходят от самой
+   камеры, а ББ и tint — диапазоном, поэтому они сделаны как «− значение +».
+   Живого превью здесь пока нет: картинку камера отдаёт отдельным потоком, и это
+   отдельный этап. */
+const BMD_WB_STEP = 100;      // шаг подкрутки кельвинов, значение шлём числом
+const BMD_TINT_STEP = 1;
+
+function bmdShutterLabel(v){ return '1/' + v; }
+
+function buildBmdCard(cam){
+  const camNum = parseInt(String(cam.id).replace(/\D/g,''),10);
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="crow"><div class="cinfo"><div class="ctop">
+      <div class="cam">${modelName(cam.model)}</div>
+      <div class="bmd-tally">tally</div>
+      <div class="bmd-tc">--:--:--:--</div>
+      <div class="rec-btn off" title="Управление записью для Blackmagic ещё не подключено"><span class="ic"></span><span class="t">REC</span></div>
+    </div></div></div>
+    <div class="bmd-fmt">
+      <span class="bmd-name"></span><b class="f-codec">—</b><span class="f-res"></span><span class="f-fps"></span><span class="f-dr"></span><span class="bmd-pw"></span>
+    </div>
+    <div class="controls">
+      <div class="ctl"><span class="ctl-lab">ISO</span>
+        <div class="ctl-row"><div class="step iso-minus">−</div><select class="ctl-sel iso-sel"></select><div class="step iso-plus">+</div></div>
+      </div>
+      <div class="ctl"><span class="ctl-lab">Shutter</span>
+        <div class="ctl-row"><div class="step sh-minus">−</div><select class="ctl-sel sh-sel"></select><div class="step sh-plus">+</div></div>
+      </div>
+      <div class="ctl"><span class="ctl-lab">Gain</span>
+        <div class="ctl-row"><div class="step g-minus">−</div><select class="ctl-sel g-sel"></select><div class="step g-plus">+</div></div>
+      </div>
+    </div>
+    <div class="controls2">
+      <div class="ctl"><span class="ctl-lab">WB</span>
+        <div class="ctl-row"><div class="step wb-minus">−</div><span class="bmd-val wb-val">—</span><div class="step wb-plus">+</div></div>
+      </div>
+      <div class="ctl"><span class="ctl-lab">Tint</span>
+        <div class="ctl-row"><div class="step t-minus">−</div><span class="bmd-val t-val">—</span><div class="step t-plus">+</div></div>
+      </div>
+    </div>
+    <div class="bmd-off">Камера найдена, но <b>REST-управление не включено</b>.<br>
+      Blackmagic Camera Setup → вкладка сети → включить Web Media Manager.</div>`;
+  const q = s => card.querySelector(s);
+  const e = {
+    card, camNum, vendor:'bmd', pend:{}, last:null,
+    name:q('.bmd-name'), tc:q('.bmd-tc'), pw:q('.bmd-pw'), tally:q('.bmd-tally'),
+    fCodec:q('.f-codec'), fRes:q('.f-res'), fFps:q('.f-fps'), fDr:q('.f-dr'),
+    isoSel:q('.iso-sel'), shSel:q('.sh-sel'), gSel:q('.g-sel'),
+    wbVal:q('.wb-val'), tVal:q('.t-val'),
+  };
+  e.isoSel.onchange = ()=>send(e,'iso','iso',e.isoSel.value);
+  q('.iso-minus').onclick = ()=>stepSelect(e,e.isoSel,'iso','iso',-1);
+  q('.iso-plus') .onclick = ()=>stepSelect(e,e.isoSel,'iso','iso',+1);
+  e.shSel.onchange  = ()=>send(e,'shutter','shutter',e.shSel.value);
+  q('.sh-minus').onclick  = ()=>stepSelect(e,e.shSel,'shutter','shutter',-1);
+  q('.sh-plus') .onclick  = ()=>stepSelect(e,e.shSel,'shutter','shutter',+1);
+  e.gSel.onchange   = ()=>send(e,'gain','gain',e.gSel.value);
+  q('.g-minus').onclick   = ()=>stepSelect(e,e.gSel,'gain','gain',-1);
+  q('.g-plus') .onclick   = ()=>stepSelect(e,e.gSel,'gain','gain',+1);
+  // ББ и tint — непрерывные: шагаем от текущего значения камеры, держась
+  // диапазона, который она сама объявила.
+  const bump = (field, action, step, dir) => {
+    const d = e.last; if(!d) return;
+    const rng = field==='wb' ? (d.wbRange||[2500,10000]) : (d.tintRange||[-50,50]);
+    const cur = Number(desired(e, field, d[field]));
+    if(!isFinite(cur)) return;
+    const nv = Math.max(rng[0], Math.min(rng[1], cur + dir*step));
+    if(nv === cur) return;
+    if(field==='wb'){ e.wbVal.textContent = nv + 'K'; } else { e.tVal.textContent = nv; }
+    send(e, field, action, nv);
+  };
+  q('.wb-minus').onclick = ()=>bump('wb','wbkelvin',BMD_WB_STEP,-1);
+  q('.wb-plus') .onclick = ()=>bump('wb','wbkelvin',BMD_WB_STEP,+1);
+  q('.t-minus') .onclick = ()=>bump('tint','tint',BMD_TINT_STEP,-1);
+  q('.t-plus')  .onclick = ()=>bump('tint','tint',BMD_TINT_STEP,+1);
+
+  // группы и перетаскивание — общие с сониевской карточкой
+  e.key = cam.key || '';
+  card.draggable = true;
+  card.addEventListener('dragstart', ev=>{
+    if(ev.target.closest('select,input,button,.rec-btn,.step')){ ev.preventDefault(); return; }
+    if(!e.key){ ev.preventDefault(); return; }
+    ev.dataTransfer.setData('text/plain', e.key);
+    ev.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', ()=>card.classList.remove('dragging'));
+  const grpRow = document.createElement('div');
+  grpRow.className = 'card-grp';
+  grpRow.innerHTML = '<span class="l">Группа</span><select></select>';
+  card.querySelector('.controls').before(grpRow);
+  e.grpRow = grpRow;
+  e.grpSel = grpRow.querySelector('select');
+  e.grpSel.onchange = ()=>moveCam(e.key, e.grpSel.value);
+
+  cards[cam.id] = e;
+  return e;
+}
+
+function updateBmdCard(e, d){
+  e.last = d;
+  if(d.key) e.key = d.key;
+
+  // Камера видна, но REST не включён — карточку показываем, гасим органы и
+  // объясняем, что сделать. Прятать нельзя: оператор решит, что камера сломалась.
+  e.card.classList.toggle('api-off', d.apiOff === true);
+  e.name.textContent = d.name || '';
+  e.tc.textContent   = d.timecode || '--:--:--:--';
+  e.pw.textContent   = d.powerSource
+      ? (d.powerSource === 'AC' ? 'сеть' : d.powerSource) +
+        (d.milliVolt ? ' · ' + (d.milliVolt/1000).toFixed(1) + 'В' : '')
+      : '';
+  const tally = String(d.tally||'None');
+  e.tally.textContent = tally === 'None' ? 'tally' : tally;
+  e.tally.classList.toggle('prev', tally === 'Preview');
+  e.tally.classList.toggle('prog', tally === 'Program');
+
+  e.fCodec.textContent = d.codec || '—';
+  e.fRes.textContent   = Array.isArray(d.resolution) ? `· ${d.resolution[0]}×${d.resolution[1]}` : '';
+  e.fFps.textContent   = d.fps ? `· ${d.fps}p` : '';
+  e.fDr.textContent    = d.dynamicRange ? `· ${d.dynamicRange}` : '';
+
+  e.card.querySelector('.rec-btn').classList.toggle('rec', d.rec === true);
+
+  // Списки — ровно те, что прислала камера.
+  fillSelect(e.isoSel, (d.isoOpts||[]).map(v=>[v,String(v)]), desired(e,'iso',d.iso), null, true);
+  fillSelect(e.shSel,  (d.shutterOpts||[]).map(v=>[v,bmdShutterLabel(v)]), desired(e,'shutter',d.shutter), null, true);
+  fillSelect(e.gSel,   (d.gainOpts||[]).map(v=>[v,(v>0?'+':'')+v+' dB']), desired(e,'gain',d.gain), null, true);
+  toggleSteps(e.card.querySelector('.iso-minus'), e.card.querySelector('.iso-plus'), e.isoSel);
+  toggleSteps(e.card.querySelector('.sh-minus'),  e.card.querySelector('.sh-plus'),  e.shSel);
+  toggleSteps(e.card.querySelector('.g-minus'),   e.card.querySelector('.g-plus'),   e.gSel);
+
+  const wb = desired(e,'wb',d.wb), tn = desired(e,'tint',d.tint);
+  e.wbVal.textContent = (wb==null || wb==='null') ? '—' : wb + 'K';
+  e.tVal.textContent  = (tn==null || tn==='null') ? '—' : tn;
+}
+
 const COLLAPSE_KEY = 'signalbox.collapsedGroups';
 let collapsedGroups = new Set();
 try { collapsedGroups = new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]')); } catch(_){}
@@ -1536,8 +1708,8 @@ function moveCam(ip, gid){
   saveGroups(); renderGroups(); placeCards();
 }
 
-const groupCards     = g => Object.values(cards).filter(e => g.cams.includes(e.ip));
-const groupOnlineIps = g => groupCards(g).map(e => e.ip);
+const groupCards     = g => Object.values(cards).filter(e => g.cams.includes(e.key));
+const groupOnlineIps = g => groupCards(g).map(e => e.key);
 
 /* Запись на группу — ОДНИМ запросом со списком камер, чтобы старт пришёлся
    на один проход, а не растянулся на несколько HTTP-вызовов подряд. */
@@ -1664,7 +1836,7 @@ function renderGroups(){
 function placeCards(){
   const sig = groups.map(g => g.id + ':' + g.name).join('|');
   Object.values(cards).forEach(e=>{
-    const gid  = gidOf(e.ip);
+    const gid  = gidOf(e.key);
     const host = gid ? groupsWrap.querySelector(`.grp-body[data-body="${gid}"]`) : ungroupedBody;
     if(host && e.card.parentNode !== host) host.appendChild(e.card);
     if(e.grpSel){
@@ -2007,7 +2179,9 @@ async function poll(){
     const data = await r.json();
     live = true; setBadge();
     setShareUrl(data.server || (/^https?:/.test(location.protocol) ? location.origin+'/' : ''));
-    const online = (data.cameras||[]).filter(c => c.online !== false);
+    // Камеру BM с выключенным Web Media Manager показываем НЕ скрывая: иначе
+    // оператор решит, что она сломалась. Она приходит как online:false + apiOff.
+    const online = (data.cameras||[]).filter(c => c.online !== false || c.apiOff === true);
     sync(online);
   }catch(_){
     live = false; setBadge();
