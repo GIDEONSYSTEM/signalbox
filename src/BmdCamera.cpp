@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <climits>
 #include <cstdlib>
 #include <vector>
 
@@ -76,6 +77,7 @@ void BmdCamera::beginDisconnect() { m_run.store(false); }
 void BmdCamera::finishRelease() {
     m_run.store(false);
     if (m_thread.joinable()) m_thread.join();
+    m_ws.close();
 }
 
 std::string BmdCamera::statusJson() {
@@ -96,16 +98,125 @@ std::string BmdCamera::statusJson() {
     return j;
 }
 
+// Свойства, на которые подписываемся. Таймкода тут намеренно нет: он шлёт
+// 12-13 событий в секунду даже на простое и забил бы канал — его дешевле раз в
+// секунду дочитать одним запросом.
+static const char* const kSubscribe[] = {
+    "/transports/0/record", "/video/iso", "/video/gain", "/video/whiteBalance",
+    "/video/whiteBalanceTint", "/video/shutter", "/camera/tallyStatus",
+    "/camera/power", "/system/format", "/system/dynamicRange", "/lens/iris",
+};
+
+bool BmdCamera::openWs() {
+    std::string host; int port;
+    { std::lock_guard<std::mutex> lk(m_hostMx); host = m_host; port = m_port; }
+    if (host.empty()) return false;
+    if (!m_ws.open(host, port, std::string(kApi) + "/event/websocket", 3000)) return false;
+
+    std::string msg;
+    m_ws.recvText(msg, 1500);                       // websocketOpened
+
+    std::string req = "{\"type\":\"request\",\"id\":1,\"data\":{\"action\":\"subscribe\",\"properties\":[";
+    for (size_t i = 0; i < sizeof(kSubscribe) / sizeof(kSubscribe[0]); ++i) {
+        if (i) req += ",";
+        req += "\"" + std::string(kSubscribe[i]) + "\"";
+    }
+    req += "]}}";
+    if (!m_ws.sendText(req)) { m_ws.close(); return false; }
+
+    // Ответ на подписку содержит И текущие значения — отдельный опрос не нужен.
+    if (m_ws.recvText(msg, 3000) && msg.find("\"success\":true") != std::string::npos) {
+        applyEvent(msg);
+        blog("[BMD %s] подписка на события установлена.\n", m_deviceName.c_str());
+        return true;
+    }
+    m_ws.close();
+    return false;
+}
+
+// Разобрать сообщение подписки. Годятся оба вида: событие об одном свойстве и
+// ответ на subscribe, где значения лежат пачкой — поля ищем по именам, а какое
+// свойство пришло, видно по самим именам.
+bool BmdCamera::applyEvent(const std::string& m) {
+    bool touched = false;
+    auto setNum = [&](const char* key, long long& dst) {
+        const long long v = jsonr::num(m, key, LLONG_MIN);
+        if (v != LLONG_MIN) { dst = v; touched = true; }
+    };
+    if (m.find("\"recording\"") != std::string::npos) {
+        m_rec.store(jsonr::boolean(m, "recording")); touched = true;
+    }
+    setNum("iso", m_slow.iso);
+    setNum("gain", m_slow.gain);
+    setNum("whiteBalance", m_slow.wb);
+    setNum("whiteBalanceTint", m_slow.tint);
+    setNum("shutterSpeed", m_slow.shutter);
+    setNum("milliVolt", m_slow.milliVolt);
+    if (m.find("\"source\"") != std::string::npos)       { m_slow.powerSrc = jsonr::str(m, "source"); touched = true; }
+    if (m.find("\"tallyStatus\"") != std::string::npos ||
+        m.find("\"/camera/tallyStatus\"") != std::string::npos) {
+        const std::string s = jsonr::str(m, "status");
+        if (!s.empty()) { m_slow.tally = s; touched = true; }
+    }
+    if (m.find("\"codec\"") != std::string::npos) {
+        m_slow.codec = jsonr::str(m, "codec");
+        m_slow.fps   = jsonr::str(m, "frameRate");
+        m_slow.w     = jsonr::numIn(m, "recordResolution", "width");
+        m_slow.h     = jsonr::numIn(m, "recordResolution", "height");
+        touched = true;
+    }
+    if (m.find("\"dynamicRange\"") != std::string::npos) { m_slow.dynRange = jsonr::str(m, "dynamicRange"); touched = true; }
+    if (m.find("\"apertureStop\"") != std::string::npos) {
+        bool f = false; const double v = jsonr::real(m, "apertureStop", &f);
+        if (f) { m_slow.iris = v; touched = true; }
+    }
+    return touched;
+}
+
+void BmdCamera::refreshTimecode() {
+    std::string host; int port;
+    { std::lock_guard<std::mutex> lk(m_hostMx); host = m_host; port = m_port; }
+    if (host.empty()) return;
+    const net::Resp r = net::get(host, port, std::string(kApi) + "/transports/0/timecode", 2500);
+    if (r.ok()) m_tc = jsonr::str(r.body, "display");
+}
+
 void BmdCamera::pollLoop() {
-    int tick = 0;
+    int restTick = 0;
     while (m_run.load()) {
-        // Пока есть неподтверждённая запись — опрашиваем полно каждый проход,
-        // иначе сверка ждала бы до пяти секунд.
+        if (!m_wsReady) {
+            // Подписки нет: берём состояние обычным опросом и пробуем поднять её.
+            // Здесь же выясняется, включено ли на камере REST-управление.
+            bool waiting;
+            { std::lock_guard<std::mutex> lk(m_pendMx); waiting = !m_pending.empty(); }
+            pollOnce(waiting || restTick % kFullEvery == 0);
+            ++restTick;
+            if (m_online.load()) m_wsReady = openWs();
+            if (!m_wsReady)
+                for (int k = 0; k < 10 && m_run.load(); ++k) std::this_thread::sleep_for(100ms);
+            continue;
+        }
+
+        // Подписка жива: ждём событие. Таймаут в секунду заодно служит тактом
+        // для таймкода — на него мы намеренно не подписаны.
+        std::string msg;
+        if (m_ws.recvText(msg, 1000)) {
+            if (applyEvent(msg)) rebuildCache();
+            bool waiting;
+            { std::lock_guard<std::mutex> lk(m_pendMx); waiting = !m_pending.empty(); }
+            if (waiting) reconcile();     // подтверждение пришло push'ом — сверяем сразу
+            continue;
+        }
+        if (!m_ws.connected()) {
+            m_wsReady = false;
+            blog("[BMD %s] подписка оборвалась — возвращаюсь к опросу.\n", m_deviceName.c_str());
+            continue;
+        }
+        refreshTimecode();
+        rebuildCache();
         bool waiting;
         { std::lock_guard<std::mutex> lk(m_pendMx); waiting = !m_pending.empty(); }
-        pollOnce(waiting || tick % kFullEvery == 0);
-        ++tick;
-        for (int k = 0; k < 10 && m_run.load(); ++k) std::this_thread::sleep_for(100ms);
+        if (waiting) reconcile();
     }
 }
 
@@ -145,9 +256,8 @@ void BmdCamera::pollOnce(bool full) {
         blog("[BMD %s] ПОДКЛЮЧЕНА (%s, %s).\n", m_deviceName.c_str(), m_model.c_str(), host.c_str());
     m_apiOff.store(false);
 
-    const bool recording = jsonr::boolean(rec.body, "recording");
-    m_rec.store(recording);
-    const std::string tc = jsonr::str(api("/transports/0/timecode").body, "display");
+    m_rec.store(jsonr::boolean(rec.body, "recording"));
+    m_tc = jsonr::str(api("/transports/0/timecode").body, "display");
 
     // Редко меняющееся — раз в kFullEvery проходов; между ними берём прежнее.
     if (full) {
@@ -186,6 +296,13 @@ void BmdCamera::pollOnce(bool full) {
         m_slow.tintMax = jsonr::numIn(td, "whiteBalanceTint", "max", 0);
     }
 
+    rebuildCache();
+    if (full) reconcile();
+}
+
+// Собрать фрагмент /status.json из текущих полей. Зовётся и после REST-опроса,
+// и после события подписки — форма одна, источник разный.
+void BmdCamera::rebuildCache() {
     // Фрагмент /status.json — СВОЙ, не сониевский: здесь нет перегрева и уровня
     // микрофона, зато есть таймкод, tally и питание. Панель ветвится по vendor.
     std::string j = "{";
@@ -194,11 +311,11 @@ void BmdCamera::pollOnce(bool full) {
     j += "\"id\":\""      + jsonw::esc(m_idLabel) + "\",";
     j += "\"model\":\""   + jsonw::esc(m_model) + "\",";
     j += "\"name\":\""    + jsonw::esc(m_deviceName) + "\",";
-    j += "\"ip\":\""      + jsonw::esc(host) + "\",";
-    j += "\"online\":true,";
-    j += "\"rec\":"       + std::string(jsonw::boolStr(recording)) + ",";
-    j += "\"apiOff\":false,";
-    j += "\"timecode\":\"" + jsonw::esc(tc) + "\",";
+    j += "\"ip\":\""      + jsonw::esc(address()) + "\",";
+    j += "\"online\":"    + std::string(jsonw::boolStr(m_online.load())) + ",";
+    j += "\"rec\":"       + std::string(jsonw::boolStr(m_rec.load())) + ",";
+    j += "\"apiOff\":"    + std::string(jsonw::boolStr(m_apiOff.load())) + ",";
+    j += "\"timecode\":\"" + jsonw::esc(m_tc) + "\",";
     j += "\"codec\":\""   + jsonw::esc(m_slow.codec) + "\",";
     j += "\"fps\":\""     + jsonw::esc(m_slow.fps) + "\",";
     j += "\"resolution\":" + ((m_slow.w > 0 && m_slow.h > 0)
@@ -238,9 +355,8 @@ void BmdCamera::pollOnce(bool full) {
     j += "}";
 
     { std::lock_guard<std::mutex> lk(m_cacheMx); m_cache = std::move(j); }
-
-    if (full) reconcile();
 }
+
 
 // Записать целое свойство и запомнить, чего ждём (сверку делает reconcile()).
 bool BmdCamera::writeNum(const std::string& path, const std::string& field, long long v) {

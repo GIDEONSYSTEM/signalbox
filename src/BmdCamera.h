@@ -8,6 +8,7 @@
 // единого сетевого вызова (у Sony там живой I/O к SDK, и это его беда, §16.3).
 
 #include "ICamera.h"
+#include "net/WsClient.h"
 
 #include <atomic>
 #include <functional>
@@ -61,7 +62,11 @@ public:
 
 private:
     void pollLoop();
-    void pollOnce(bool full);
+    void pollOnce(bool full);          // снимок состояния обычным REST
+    void rebuildCache();               // собрать фрагмент /status.json из полей
+    bool openWs();                     // подключиться и подписаться
+    bool applyEvent(const std::string& msg);   // разобрать propertyValueChanged
+    void refreshTimecode();            // таймкод одним REST-запросом
 
     // 🔴 Сверка применения. У BM код 204 значит «команда принята», а НЕ
     // «подействовало» (§15.4): камера может молча не применить значение — так
@@ -115,7 +120,17 @@ private:
         long long   wbMin = -1, wbMax = -1, tintMin = 0, tintMax = 0;
         std::string autoExposure;
     };
-    Slow               m_slow;            // только из pollLoop
+    Slow               m_slow;            // только из потока опроса
+    std::string        m_tc;              // таймкод, только из потока опроса
+
+    // 🔴 Состояние приходит подпиской, а не опросом: камера сама шлёт
+    // propertyValueChanged, и push успевает раньше, чем завершится обычный
+    // REST-запрос. Опрос остаётся запасным путём — на случай, когда WebSocket
+    // не поднялся или оборвался.
+    ws::Client         m_ws;
+    // ⚠️ На таймкод НЕ подписываемся: он сыплет 12-13 событиями в секунду даже
+    // на простое. Его дешевле раз в секунду дочитывать одним запросом.
+    bool               m_wsReady = false;
 
     std::atomic<bool>  m_run{true};
     std::thread        m_thread;
