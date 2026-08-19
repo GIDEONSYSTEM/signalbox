@@ -334,9 +334,16 @@
   .bmd-tally.prog{color:var(--crit); border-color:rgba(255,77,77,.5);}
   .bmd-off{display:none; margin-top:9px; padding:8px 10px; border-radius:8px; font-size:11px; line-height:1.5;
            background:rgba(255,170,0,.08); border:1px solid rgba(255,170,0,.35); color:var(--warn, #ffaa00);}
-  .card.api-off .bmd-off{display:block;}
-  .card.api-off .controls, .card.api-off .controls2, .card.api-off .bmd-fmt{opacity:.35; pointer-events:none;}
-  .card.api-off .rec-btn, .card.api-off .bmd-tc, .card.api-off .bmd-tally{opacity:.35;}
+  .card.unavail .bmd-off{display:block;}
+  .card.unavail .controls, .card.unavail .controls2, .card.unavail .bmd-fmt{opacity:.35; pointer-events:none;}
+  .card.unavail .rec-btn, .card.unavail .bmd-tc, .card.unavail .bmd-tally{opacity:.35;}
+  /* Не отвечает — это иная беда, чем выключенное управление: другой цвет. */
+  .card.is-lost{border-color:rgba(255,77,77,.45);}
+  .card.is-lost .bmd-off{background:rgba(255,77,77,.08); border-color:rgba(255,77,77,.4); color:var(--crit);}
+  .bmd-lost{display:none; font-size:10px; letter-spacing:.06em; text-transform:uppercase; white-space:nowrap;
+            padding:1px 6px; border-radius:4px; color:var(--crit); border:1px solid rgba(255,77,77,.5);}
+  .card.is-lost .bmd-lost{display:block;}
+  .card.unavail .cam{opacity:.55;}
   .ctl{display:flex; flex-direction:column; gap:3px; min-width:0;}
   /* line-height и nowrap — те же, что у подписи первого ряда: без этого строки
      подписей разной высоты и ряды не сходятся по вертикали */
@@ -1371,6 +1378,7 @@ function buildBmdCard(cam){
     <div class="crow"><div class="cinfo"><div class="ctop">
       <div class="cam">${modelName(cam.model)}</div>
       <div class="bmd-tally">tally</div>
+      <div class="bmd-lost">нет связи</div>
       <div class="bmd-tc">--:--:--:--</div>
       <div class="rec-btn off" title="Управление записью для Blackmagic ещё не подключено"><span class="ic"></span><span class="t">REC</span></div>
     </div></div></div>
@@ -1402,6 +1410,7 @@ function buildBmdCard(cam){
   const e = {
     card, camNum, vendor:'bmd', pend:{}, last:null,
     name:q('.bmd-name'), tc:q('.bmd-tc'), pw:q('.bmd-pw'), tally:q('.bmd-tally'),
+    lost:q('.bmd-lost'), offMsg:q('.bmd-off'),
     fCodec:q('.f-codec'), fRes:q('.f-res'), fFps:q('.f-fps'), fDr:q('.f-dr'),
     isoSel:q('.iso-sel'), shSel:q('.sh-sel'), gSel:q('.g-sel'),
     wbVal:q('.wb-val'), tVal:q('.t-val'),
@@ -1461,7 +1470,20 @@ function updateBmdCard(e, d){
 
   // Камера видна, но REST не включён — карточку показываем, гасим органы и
   // объясняем, что сделать. Прятать нельзя: оператор решит, что камера сломалась.
-  e.card.classList.toggle('api-off', d.apiOff === true);
+  // Три состояния: рабочая, найдена но REST выключен, и просто не отвечает.
+  // Различать важно: первое чинится галочкой в Camera Setup, второе — питанием
+  // и кабелем, и подсказки должны быть разные.
+  const apiOff  = d.apiOff === true;
+  const offline = d.online === false && !apiOff;
+  e.card.classList.toggle('unavail', apiOff || offline);
+  e.card.classList.toggle('is-lost', offline);
+  if(e.offMsg){
+    e.offMsg.innerHTML = apiOff
+      ? 'Камера найдена, но <b>REST-управление не включено</b>.<br>' +
+        'Blackmagic Camera Setup → вкладка сети → включить Web Media Manager.'
+      : 'Камера <b>не отвечает</b> — управление недоступно.<br>' +
+        'Проверьте питание камеры и кабель Ethernet.';
+  }
   e.name.textContent = d.name || '';
   // Во время записи оператору нужна ДЛИТЕЛЬНОСТЬ (timeline у камеры), а не часы:
   // это разные величины, камера отдаёт обе. Вне записи показываем таймкод камеры.
@@ -2218,9 +2240,11 @@ async function poll(){
     const data = await r.json();
     live = true; setBadge();
     setShareUrl(data.server || (/^https?:/.test(location.protocol) ? location.origin+'/' : ''));
-    // Камеру BM с выключенным Web Media Manager показываем НЕ скрывая: иначе
-    // оператор решит, что она сломалась. Она приходит как online:false + apiOff.
-    const online = (data.cameras||[]).filter(c => c.online !== false || c.apiOff === true);
+    // Камеры BM из панели не убираем никогда: пропавшая карточка не отличима от
+    // «её тут и не было», а оператору нужно видеть, что камера есть, но
+    // недоступна — выключена, отключён кабель или не включено REST-управление.
+    // Камеры Sony ведут себя как раньше: офлайн — значит нет в панели.
+    const online = (data.cameras||[]).filter(c => c.online !== false || c.vendor === 'bmd');
     sync(online);
   }catch(_){
     live = false; setBadge();

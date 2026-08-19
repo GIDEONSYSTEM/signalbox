@@ -227,12 +227,29 @@ BmdCamera::Change BmdCamera::applyEvent(const std::string& m) {
     return tc ? Change::TimecodeOnly : Change::None;
 }
 
-void BmdCamera::refreshTimecode() {
+bool BmdCamera::refreshTimecode() {
     std::string host; int port;
     { std::lock_guard<std::mutex> lk(m_hostMx); host = m_host; port = m_port; }
-    if (host.empty()) return;
-    const net::Resp r = net::get(host, port, std::string(kApi) + "/transports/0/timecode", 2500);
-    if (r.ok()) m_tc = jsonr::str(r.body, "display");
+    if (host.empty()) return false;
+    // Таймаут короче общего: этот запрос заодно служит проверкой живости, и
+    // ждать по 2.5 с на каждой попытке значило бы узнавать о пропаже слишком долго.
+    const net::Resp r = net::get(host, port, std::string(kApi) + "/transports/0/timecode", 1500);
+    if (!r.ok()) return false;
+    m_tc      = jsonr::str(r.body, "display");
+    m_recTime = jsonr::str(r.body, "timeline");
+    return true;
+}
+
+// Камера перестала отвечать: гасим подписку и помечаем офлайн, чтобы панель
+// показала это, а не застывшие значения.
+void BmdCamera::markLost(const char* why) {
+    blog("[BMD %s] связь потеряна (%s).\n", m_deviceName.c_str(), why);
+    m_ws.close();
+    m_wsReady = false;
+    m_tcFailStreak = 0;
+    m_online.store(false);
+    { std::lock_guard<std::mutex> lk(m_cacheMx); m_cache.clear(); }
+    if (g_onChanged) g_onChanged();
 }
 
 void BmdCamera::pollLoop() {
@@ -284,7 +301,14 @@ void BmdCamera::pollLoop() {
             blog("[BMD %s] подписка оборвалась — возвращаюсь к опросу.\n", m_deviceName.c_str());
             continue;
         }
-        refreshTimecode();
+        // ⚠️ Молчание подписки само по себе НЕ значит, что камера жива: сокет
+        // может остаться открытым, когда камеру выключили. Поэтому раз в такт
+        // дочитываем таймкод и заодно проверяем, отвечает ли она вообще.
+        if (!refreshTimecode()) {
+            if (++m_tcFailStreak >= kLostAfterFails) { markLost("камера не отвечает"); }
+            continue;
+        }
+        m_tcFailStreak = 0;
         rebuildCache();
         bool waiting;
         { std::lock_guard<std::mutex> lk(m_pendMx); waiting = !m_pending.empty(); }
