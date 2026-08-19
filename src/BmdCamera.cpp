@@ -104,10 +104,19 @@ std::string BmdCamera::statusJson() {
 // 12-13 событий в секунду даже на простое и забил бы канал — его дешевле раз в
 // секунду дочитать одним запросом.
 static const char* const kSubscribe[] = {
-    "/transports/0/record", "/video/iso", "/video/gain", "/video/whiteBalance",
+    "/transports/0/record", "/transports/0/timecode",
+    "/video/iso", "/video/gain", "/video/whiteBalance",
     "/video/whiteBalanceTint", "/video/shutter", "/camera/tallyStatus",
     "/camera/power", "/system/format", "/system/dynamicRange", "/lens/iris",
 };
+
+// Как часто пересобирать /status.json из-за одного лишь таймкода. Панель
+// опрашивает раз в 100 мс, поэтому чаще — работа впустую: человек этого не
+// увидит, а тело статуса будет качаться на каждом опросе.
+constexpr auto kTimecodeUiInterval = std::chrono::milliseconds(100);
+// Не чаще этого досылаем неподтверждённое значение. События идут ~12/с, и без
+// паузы три попытки сгорели бы за четверть секунды — камера не успела бы.
+constexpr auto kReconcileInterval  = std::chrono::milliseconds(400);
 
 bool BmdCamera::openWs() {
     std::string host; int port;
@@ -129,6 +138,7 @@ bool BmdCamera::openWs() {
     // Ответ на подписку содержит И текущие значения — отдельный опрос не нужен.
     if (m_ws.recvText(msg, 3000) && msg.find("\"success\":true") != std::string::npos) {
         applyEvent(msg);
+        rebuildCache();
         blog("[BMD %s] подписка на события установлена.\n", m_deviceName.c_str());
         return true;
     }
@@ -139,14 +149,26 @@ bool BmdCamera::openWs() {
 // Разобрать сообщение подписки. Годятся оба вида: событие об одном свойстве и
 // ответ на subscribe, где значения лежат пачкой — поля ищем по именам, а какое
 // свойство пришло, видно по самим именам.
-bool BmdCamera::applyEvent(const std::string& m) {
-    bool touched = false;
+BmdCamera::Change BmdCamera::applyEvent(const std::string& m) {
+    bool tc = false, other = false;
+
+    // Таймкод — самое частое событие, поэтому проверяем его первым и отдельно.
+    if (m.find("\"display\"") != std::string::npos) {
+        const std::string v = jsonr::str(m, "display");
+        if (!v.empty() && v != m_tc) { m_tc = v; tc = true; }
+        // timeline — длительность записи, а display — часы камеры. Это разные
+        // величины, и оператору во время записи нужна именно первая.
+        const std::string tl = jsonr::str(m, "timeline");
+        if (!tl.empty() && tl != m_recTime) { m_recTime = tl; tc = true; }
+    }
+
     auto setNum = [&](const char* key, long long& dst) {
         const long long v = jsonr::num(m, key, LLONG_MIN);
-        if (v != LLONG_MIN) { dst = v; touched = true; }
+        if (v != LLONG_MIN && v != dst) { dst = v; other = true; }
     };
     if (m.find("\"recording\"") != std::string::npos) {
-        m_rec.store(jsonr::boolean(m, "recording")); touched = true;
+        const bool r = jsonr::boolean(m, "recording");
+        if (r != m_rec.exchange(r)) other = true;
     }
     setNum("iso", m_slow.iso);
     setNum("gain", m_slow.gain);
@@ -154,25 +176,32 @@ bool BmdCamera::applyEvent(const std::string& m) {
     setNum("whiteBalanceTint", m_slow.tint);
     setNum("shutterSpeed", m_slow.shutter);
     setNum("milliVolt", m_slow.milliVolt);
-    if (m.find("\"source\"") != std::string::npos)       { m_slow.powerSrc = jsonr::str(m, "source"); touched = true; }
-    if (m.find("\"tallyStatus\"") != std::string::npos ||
-        m.find("\"/camera/tallyStatus\"") != std::string::npos) {
-        const std::string s = jsonr::str(m, "status");
-        if (!s.empty()) { m_slow.tally = s; touched = true; }
+    if (m.find("\"source\"") != std::string::npos) {
+        const std::string v = jsonr::str(m, "source");
+        if (!v.empty() && v != m_slow.powerSrc) { m_slow.powerSrc = v; other = true; }
+    }
+    if (m.find("tallyStatus") != std::string::npos) {
+        const std::string v = jsonr::str(m, "status");
+        if (!v.empty() && v != m_slow.tally) { m_slow.tally = v; other = true; }
     }
     if (m.find("\"codec\"") != std::string::npos) {
         m_slow.codec = jsonr::str(m, "codec");
         m_slow.fps   = jsonr::str(m, "frameRate");
         m_slow.w     = jsonr::numIn(m, "recordResolution", "width");
         m_slow.h     = jsonr::numIn(m, "recordResolution", "height");
-        touched = true;
+        other = true;
     }
-    if (m.find("\"dynamicRange\"") != std::string::npos) { m_slow.dynRange = jsonr::str(m, "dynamicRange"); touched = true; }
+    if (m.find("\"dynamicRange\"") != std::string::npos) {
+        const std::string v = jsonr::str(m, "dynamicRange");
+        if (!v.empty() && v != m_slow.dynRange) { m_slow.dynRange = v; other = true; }
+    }
     if (m.find("\"apertureStop\"") != std::string::npos) {
         bool f = false; const double v = jsonr::real(m, "apertureStop", &f);
-        if (f) { m_slow.iris = v; touched = true; }
+        if (f && v != m_slow.iris) { m_slow.iris = v; other = true; }
     }
-    return touched;
+
+    if (other) return Change::Other;
+    return tc ? Change::TimecodeOnly : Change::None;
 }
 
 void BmdCamera::refreshTimecode() {
@@ -203,10 +232,20 @@ void BmdCamera::pollLoop() {
         // для таймкода — на него мы намеренно не подписаны.
         std::string msg;
         if (m_ws.recvText(msg, 1000)) {
-            if (applyEvent(msg)) rebuildCache();
+            const Change ch  = applyEvent(msg);
+            const auto   now = std::chrono::steady_clock::now();
+            if (ch == Change::Other) {
+                rebuildCache();                        // важное — сразу
+            } else if (ch == Change::TimecodeOnly && now - m_lastTcRebuild >= kTimecodeUiInterval) {
+                m_lastTcRebuild = now;                 // таймкод — не чаще, чем видит панель
+                rebuildCache();
+            }
             bool waiting;
             { std::lock_guard<std::mutex> lk(m_pendMx); waiting = !m_pending.empty(); }
-            if (waiting) reconcile();     // подтверждение пришло push'ом — сверяем сразу
+            if (waiting && now - m_lastReconcile >= kReconcileInterval) {
+                m_lastReconcile = now;                 // не сжигать попытки за четверть секунды
+                reconcile();
+            }
             continue;
         }
         if (!m_ws.connected()) {
@@ -259,7 +298,11 @@ void BmdCamera::pollOnce(bool full) {
     m_apiOff.store(false);
 
     m_rec.store(jsonr::boolean(rec.body, "recording"));
-    m_tc = jsonr::str(api("/transports/0/timecode").body, "display");
+    {
+        const std::string tcBody = api("/transports/0/timecode").body;
+        m_tc      = jsonr::str(tcBody, "display");
+        m_recTime = jsonr::str(tcBody, "timeline");
+    }
 
     // Редко меняющееся — раз в kFullEvery проходов; между ними берём прежнее.
     if (full) {
@@ -318,6 +361,7 @@ void BmdCamera::rebuildCache() {
     j += "\"rec\":"       + std::string(jsonw::boolStr(m_rec.load())) + ",";
     j += "\"apiOff\":"    + std::string(jsonw::boolStr(m_apiOff.load())) + ",";
     j += "\"timecode\":\"" + jsonw::esc(m_tc) + "\",";
+    j += "\"recTime\":\""  + jsonw::esc(m_recTime) + "\",";
     j += "\"codec\":\""   + jsonw::esc(m_slow.codec) + "\",";
     j += "\"fps\":\""     + jsonw::esc(m_slow.fps) + "\",";
     j += "\"resolution\":" + ((m_slow.w > 0 && m_slow.h > 0)

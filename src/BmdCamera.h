@@ -11,6 +11,7 @@
 #include "net/WsClient.h"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -70,7 +71,11 @@ private:
     void pollOnce(bool full);          // снимок состояния обычным REST
     void rebuildCache();               // собрать фрагмент /status.json из полей
     bool openWs();                     // подключиться и подписаться
-    bool applyEvent(const std::string& msg);   // разобрать propertyValueChanged
+    // Что изменилось после разбора события подписки. Таймкод выделен отдельно:
+    // он приходит ~12 раз в секунду, и пересобирать из-за него /status.json так
+    // же часто незачем — панель опрашивает реже и всё равно этого не увидит.
+    enum class Change { None, TimecodeOnly, Other };
+    Change applyEvent(const std::string& msg);   // разобрать propertyValueChanged
     void refreshTimecode();            // таймкод одним REST-запросом
 
     // 🔴 Сверка применения. У BM код 204 значит «команда принята», а НЕ
@@ -126,16 +131,23 @@ private:
         std::string autoExposure;
     };
     Slow               m_slow;            // только из потока опроса
-    std::string        m_tc;              // таймкод, только из потока опроса
+    std::string        m_tc;              // таймкод (часы камеры), только из потока опроса
+    std::string        m_recTime;         // длительность на таймлайне = время записи
 
     // 🔴 Состояние приходит подпиской, а не опросом: камера сама шлёт
     // propertyValueChanged, и push успевает раньше, чем завершится обычный
     // REST-запрос. Опрос остаётся запасным путём — на случай, когда WebSocket
     // не поднялся или оборвался.
     ws::Client         m_ws;
-    // ⚠️ На таймкод НЕ подписываемся: он сыплет 12-13 событиями в секунду даже
-    // на простое. Его дешевле раз в секунду дочитывать одним запросом.
     bool               m_wsReady = false;
+    // Таймкод приходит подпиской и сыплет ~12.5 событиями в секунду. Само по
+    // себе это дёшево (1.85 КБ/с по уже открытому соединению, новых TCP нет),
+    // но пересобирать из-за него /status.json 12 раз в секунду незачем: панель
+    // опрашивает раз в 100 мс и чаще всё равно ничего не увидит.
+    std::chrono::steady_clock::time_point m_lastTcRebuild{};
+    // ⚠️ Сверку тоже нельзя гнать на каждом событии: три попытки уложились бы в
+    // четверть секунды, и мы бы сдались раньше, чем камера успела применить.
+    std::chrono::steady_clock::time_point m_lastReconcile{};
 
     std::atomic<bool>  m_run{true};
     std::thread        m_thread;

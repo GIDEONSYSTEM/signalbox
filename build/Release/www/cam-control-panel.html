@@ -317,6 +317,7 @@
   /* ---- карточка Blackmagic ---- */
   .bmd-name{font-size:11px; color:var(--ink); font-weight:600; white-space:nowrap;}
   .bmd-tc{font-family:var(--mono); font-size:12px; color:var(--ink); white-space:nowrap; margin-left:auto;}
+  .bmd-tc.rec-time{color:var(--crit); font-weight:600;}   /* идёт запись — это длительность */
   .bmd-pw{font-size:11px; color:var(--ink-dim); white-space:nowrap; margin-left:auto;}
   /* Название модели не ужимаем: оно и есть главный опознавательный признак. */
   .card .ctop .cam{flex:0 0 auto;}
@@ -1443,7 +1444,12 @@ function updateBmdCard(e, d){
   // объясняем, что сделать. Прятать нельзя: оператор решит, что камера сломалась.
   e.card.classList.toggle('api-off', d.apiOff === true);
   e.name.textContent = d.name || '';
-  e.tc.textContent   = d.timecode || '--:--:--:--';
+  // Во время записи оператору нужна ДЛИТЕЛЬНОСТЬ (timeline у камеры), а не часы:
+  // это разные величины, камера отдаёт обе. Вне записи показываем таймкод камеры.
+  const recTime = d.recTime && d.recTime !== '00:00:00:00' ? d.recTime : null;
+  e.tc.textContent = (d.rec && recTime) ? recTime : (d.timecode || '--:--:--:--');
+  e.tc.classList.toggle('rec-time', !!(d.rec && recTime));
+  e.tc.title = (d.rec && recTime) ? 'Длительность записи' : 'Таймкод камеры';
   e.pw.textContent   = d.powerSource
       ? (d.powerSource === 'AC' ? 'сеть' : d.powerSource) +
         (d.milliVolt ? ' · ' + (d.milliVolt/1000).toFixed(1) + 'В' : '')
