@@ -1344,6 +1344,16 @@ const BMD_TINT_STEP = 1;
 
 function bmdShutterLabel(v){ return '1/' + v; }
 
+/* Камера отдаёт таймкод как ЧЧ:ММ:СС:КК, где последняя группа — номер кадра
+   (0..24 при 25p), а не миллисекунды. Оператору она не нужна: показываем ЧЧ:ММ:СС.
+   Полное значение остаётся в /status.json — обрезаем только на показ.
+   Разделителем перед кадрами бывает и ';' (drop-frame), поэтому режем по обоим. */
+function tcShort(v){
+  if(!v) return '';
+  const p = String(v).split(/[:;]/);
+  return p.length >= 3 ? p.slice(0, 3).join(':') : String(v);
+}
+
 function buildBmdCard(cam){
   const camNum = parseInt(String(cam.id).replace(/\D/g,''),10);
   const card = document.createElement('div');
@@ -1447,7 +1457,7 @@ function updateBmdCard(e, d){
   // Во время записи оператору нужна ДЛИТЕЛЬНОСТЬ (timeline у камеры), а не часы:
   // это разные величины, камера отдаёт обе. Вне записи показываем таймкод камеры.
   const recTime = d.recTime && d.recTime !== '00:00:00:00' ? d.recTime : null;
-  e.tc.textContent = (d.rec && recTime) ? recTime : (d.timecode || '--:--:--:--');
+  e.tc.textContent = tcShort((d.rec && recTime) ? recTime : d.timecode) || '--:--:--';
   e.tc.classList.toggle('rec-time', !!(d.rec && recTime));
   e.tc.title = (d.rec && recTime) ? 'Длительность записи' : 'Таймкод камеры';
   e.pw.textContent   = d.powerSource
