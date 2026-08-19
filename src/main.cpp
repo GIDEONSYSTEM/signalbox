@@ -34,6 +34,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <condition_variable>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -51,6 +52,20 @@ using coll::CamStatus;
 // after the vector reallocates — readers copy raw pointers under a short lock.
 static std::vector<std::unique_ptr<cam::ICamera>>   g_cams;
 static std::mutex                                  g_camsMutex;    // guards g_cams structure
+
+// 🔴 Версия /status.json и будильник для его пересборки.
+// (1) Неизменившийся статус отдаём как 304 без тела — тот же приём, что у кадров
+// live view (§6): панель может опрашивать часто и почти ничего не качать.
+// (2) Пересобираем по СОБЫТИЮ: камеры Blackmagic присылают изменения сами, и
+// ждать следующего такта значило бы добавлять задержку на пустом месте.
+static std::atomic<unsigned long long> g_statusSeq{0};
+static std::mutex                      g_statusWakeMx;
+static std::condition_variable         g_statusWake;
+static bool                            g_statusDirty = false;
+static void wakeStatusBuild() {
+    { std::lock_guard<std::mutex> lk(g_statusWakeMx); g_statusDirty = true; }
+    g_statusWake.notify_one();
+}
 static std::mutex                                  g_statusMutex;  // guards g_statusJson
 static std::string                                 g_statusJson = "{\"cameras\":[]}";
 
@@ -76,6 +91,11 @@ static std::atomic<bool>                           g_running{true};
 static std::atomic<bool>                           g_restart{false};  // true => drop marker, launcher relaunches
 
 static const unsigned short kPort = 8787;
+// Страховочный такт пересборки /status.json. Камеры Blackmagic будят сборку
+// сами (подписка), а у Sony событий нет — её значения перечитываем по таймеру.
+// Замерено: сама сборка занимает <1 мс, свойства Sony отдаёт SDK из своего кэша
+// и в камеру за ними не ходит, поэтому частый такт ничего не стоит ни ПК, ни камере.
+static constexpr std::chrono::milliseconds kStatusIdleTick{150};
 
 // ---------------- helpers ----------------
 // With no console window the log file is the only place startup diagnostics
@@ -1604,6 +1624,20 @@ static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std:
     coll::HttpResponse r;
 
     if (req.method == "GET" && req.path == "/status.json") {
+        // ⚠️ Строку запроса HttpServer кладёт в req.query, а НЕ в req.path — на
+        // этом уже обжигались с кадрами live view (§6): ветка 304 тогда не
+        // срабатывала вообще, потому что seq искали в пути.
+        long long haveSeq = -1;
+        {
+            const size_t k = req.query.find("seq=");
+            if (k != std::string::npos) haveSeq = std::atoll(req.query.c_str() + k + 4);
+        }
+        const unsigned long long cur = g_statusSeq.load();
+        r.extraHeaders = "X-Status-Seq: " + std::to_string(cur) + "\r\n";
+        if (haveSeq >= 0 && static_cast<unsigned long long>(haveSeq) == cur) {
+            r.status = 304; r.statusText = "Not Modified";
+            return r;                                  // тела нет
+        }
         r.contentType = "application/json; charset=utf-8";
         { std::lock_guard<std::mutex> lk(g_statusMutex); r.body = g_statusJson; }
         return r;
@@ -1911,6 +1945,7 @@ int main() {
     // консоль (сборка без окна) и пропадало.
     coll::setLogSink([](const std::string& s) { writeConsoleUtf8(s); });
     bmd::setLogSink([](const std::string& s) { writeConsoleUtf8(s); });
+    bmd::setOnChanged(wakeStatusBuild);
 
     // Work from the exe directory so the SDK finds Cr_Core.dll + CrAdapter/.
     plat::setWorkingDir(plat::exeDir());
@@ -2005,9 +2040,16 @@ int main() {
     std::thread poller([]() {
         while (g_running.load()) {
             std::string j = buildStatusJson();
-            { std::lock_guard<std::mutex> lk(g_statusMutex); g_statusJson = std::move(j); }
-            for (int k = 0; k < 10 && g_running.load(); ++k)
-                std::this_thread::sleep_for(100ms);
+            {
+                std::lock_guard<std::mutex> lk(g_statusMutex);
+                if (j != g_statusJson) {            // версию двигаем ТОЛЬКО при изменении,
+                    g_statusJson = std::move(j);    // иначе панель зря качала бы тело
+                    g_statusSeq.fetch_add(1);
+                }
+            }
+            std::unique_lock<std::mutex> lk(g_statusWakeMx);
+            g_statusWake.wait_for(lk, kStatusIdleTick, [] { return g_statusDirty || !g_running.load(); });
+            g_statusDirty = false;
         }
     });
 
@@ -2118,6 +2160,7 @@ int main() {
 
     consolePrintf("\nОстановка...\n");
     startShutdownWatchdog(8);            // never let a stuck SDK call strand the process
+    wakeStatusBuild();                    // не досыпать такт на выходе
     if (poller.joinable())     poller.join();
     if (discoverer.joinable()) discoverer.join();
     plat::midiStop();           // stop MIDI callbacks before joining the worker

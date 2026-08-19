@@ -23,6 +23,11 @@ namespace bmd {
 // Куда писать диагностику камер BM (как coll::setLogSink у Sony).
 void setLogSink(std::function<void(const std::string&)> sink);
 
+// Кого будить, когда состояние камеры изменилось. Нужен, чтобы /status.json
+// пересобирался ПО СОБЫТИЮ, а не по таймеру: камера присылает изменение сама,
+// и ждать следующего такта опроса означало бы добавлять задержку на ровном месте.
+void setOnChanged(std::function<void()> cb);
+
 // То, что известно о камере из анонса mDNS (или задано вручную).
 struct Found {
     std::string host;              // IP или имя вида PYXIS-6K-3.local

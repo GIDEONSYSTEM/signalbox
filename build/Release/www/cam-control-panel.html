@@ -698,7 +698,10 @@ const LV_BASE = (location.protocol==='http:'||location.protocol==='https:') ? lo
 const CONFIG = {
   statusEndpoint: LV_BASE + "/status.json", // откуда читаем состояние
   cmdEndpoint:    LV_BASE + "/cmd",          // куда шлём команды (POST)
-  pollMs: 1000,
+  // Опрос статуса. Частый такт дёшев: сервер отдаёт 304 без тела, если ничего
+  // не изменилось (как с кадрами live view), а сам статус пересобирается по
+  // событию от камеры, а не по таймеру. Задержка «камера -> панель» = этот такт.
+  pollMs: 150,
 
   // Пороги для цветов метрик
   battery: { warn: 35, crit: 15 },     // % заряда
@@ -2171,11 +2174,17 @@ function setBadge(){
   b.className = 'badge ' + (live?'live':'demo');
   b.querySelector('.t').textContent = live ? 'live' : 'нет связи';
 }
+let statusSeq = -1;            // версия статуса, чтобы не качать неизменившееся
 async function poll(){
   if(shuttingDown) return;     // сборщик выключается — не мигать «нет связи»
   try{
-    const r = await fetch(CONFIG.statusEndpoint,{cache:'no-store'});
+    const url = CONFIG.statusEndpoint + (statusSeq >= 0 ? '?seq=' + statusSeq : '');
+    const r = await fetch(url,{cache:'no-store'});
+    // 304 — статус не менялся с прошлого раза: тела нет, перерисовывать нечего.
+    if(r.status === 304){ if(!live){ live = true; setBadge(); } return; }
     if(!r.ok) throw 0;
+    const seqHdr = r.headers.get('X-Status-Seq');
+    if(seqHdr !== null) statusSeq = Number(seqHdr);
     const data = await r.json();
     live = true; setBadge();
     setShareUrl(data.server || (/^https?:/.test(location.protocol) ? location.origin+'/' : ''));
@@ -2185,6 +2194,7 @@ async function poll(){
     sync(online);
   }catch(_){
     live = false; setBadge();
+    statusSeq = -1;            // связь рвалась — следующий запрос за полным телом
     sync([]);   // сборщик недоступен → карточек нет
   }
 }

@@ -17,6 +17,7 @@ using namespace std::chrono_literals;
 namespace {
 
 std::function<void(const std::string&)> g_logSink;
+std::function<void()>                   g_onChanged;
 
 void blog(const char* fmt, ...) {
     char buf[1024];
@@ -41,6 +42,7 @@ constexpr int kFullEvery = 5;
 namespace bmd {
 
 void setLogSink(std::function<void(const std::string&)> sink) { g_logSink = std::move(sink); }
+void setOnChanged(std::function<void()> cb)              { g_onChanged = std::move(cb); }
 
 BmdCamera::BmdCamera(int index, const Found& f)
     : m_index(index),
@@ -355,6 +357,7 @@ void BmdCamera::rebuildCache() {
     j += "}";
 
     { std::lock_guard<std::mutex> lk(m_cacheMx); m_cache = std::move(j); }
+    if (g_onChanged) g_onChanged();     // разбудить сборку /status.json
 }
 
 
