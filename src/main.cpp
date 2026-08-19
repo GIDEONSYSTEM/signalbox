@@ -95,7 +95,7 @@ static const unsigned short kPort = 8787;
 // сами (подписка), а у Sony событий нет — её значения перечитываем по таймеру.
 // Замерено: сама сборка занимает <1 мс, свойства Sony отдаёт SDK из своего кэша
 // и в камеру за ними не ходит, поэтому частый такт ничего не стоит ни ПК, ни камере.
-static constexpr std::chrono::milliseconds kStatusIdleTick{150};
+static constexpr std::chrono::milliseconds kStatusIdleTick{100};
 
 // ---------------- helpers ----------------
 // With no console window the log file is the only place startup diagnostics
