@@ -47,10 +47,20 @@ using coll::CameraSession;
 using coll::CamStatus;
 
 // ---------------- globals ----------------
-// g_cams only ever grows (cameras are added by discovery, never removed until
+// 🔴 Камеры держим по shared_ptr, а НЕ по unique_ptr с сырыми указателями наружу.
+// Причина: resolveTargets, сборка статуса и поток live view копируют ссылки под
+// мьютексом, а работают с ними уже БЕЗ него. Пока список только рос, сырой
+// указатель жил вечно и это было безопасно. С автоудалением пропавших камер так
+// нельзя: объект мог бы исчезнуть у другого потока под рукой. shared_ptr решает
+// это без глобальной блокировки — камера доживает до последнего держателя.
+// (было: g_cams only ever grows (cameras are added by discovery, never removed until
 // shutdown), so a CameraSession* stays valid for the process lifetime even
 // after the vector reallocates — readers copy raw pointers under a short lock.
-static std::vector<std::unique_ptr<cam::ICamera>>   g_cams;
+static std::vector<std::shared_ptr<cam::ICamera>>   g_cams;
+// Номера камер не переиспользуем: панель хранит карточки по «CAM N», и если
+// номер выбывшей камеры достанется новой, карточка чужой марки будет обновлена
+// чужими данными.
+static int                                         g_nextCamIndex = 1;
 static std::mutex                                  g_camsMutex;    // guards g_cams structure
 
 // 🔴 Версия /status.json и будильник для его пересборки.
@@ -96,6 +106,10 @@ static const unsigned short kPort = 8787;
 // Замерено: сама сборка занимает <1 мс, свойства Sony отдаёт SDK из своего кэша
 // и в камеру за ними не ходит, поэтому частый такт ничего не стоит ни ПК, ни камере.
 static constexpr std::chrono::milliseconds kStatusIdleTick{100};
+// Сколько ждать, прежде чем убрать пропавшую камеру Blackmagic из панели.
+// Пять минут: перезагрузка камеры и короткий обрыв сети это переживают, а
+// переезд в другую студию — уже нет, и вчерашние карточки не копятся.
+static constexpr long long kForgetLostMs = 5 * 60 * 1000;
 
 // ---------------- helpers ----------------
 // With no console window the log file is the only place startup diagnostics
@@ -680,10 +694,10 @@ static bool readFileBinary(const std::string& full, std::string& out) {
 // Build /status.json from the live cameras (dynamic count). Reads each camera's
 // status fresh. Called by the poll thread once a second.
 static std::string buildStatusJson() {
-    std::vector<cam::ICamera*> cams;
+    std::vector<std::shared_ptr<cam::ICamera>> cams;
     { std::lock_guard<std::mutex> lk(g_camsMutex);
       cams.reserve(g_cams.size());
-      for (auto& c : g_cams) cams.push_back(c.get()); }
+      for (auto& c : g_cams) cams.push_back(c); }
 
     // LAN-адрес пульта для шаринга на другие устройства (кэшируем — считаем 1 раз).
     static const std::string server = []() {
@@ -992,8 +1006,8 @@ static void addManualCamsOnce(bool announce) {
         std::string fm;
         {
             std::lock_guard<std::mutex> lk(g_camsMutex);
-            int idx = static_cast<int>(g_cams.size()) + 1;
-            auto cam = std::make_unique<CameraSession>(idx, info);
+            int idx = g_nextCamIndex++;
+            auto cam = std::make_shared<CameraSession>(idx, info);
             fm = cam->modelDisplay();
             g_cams.push_back(std::move(cam));
         }
@@ -1152,8 +1166,8 @@ static void reconnectKnownOnce(bool announce) {
         std::string fm;
         {
             std::lock_guard<std::mutex> lk(g_camsMutex);
-            int idx = static_cast<int>(g_cams.size()) + 1;
-            auto cam = std::make_unique<CameraSession>(idx, info);
+            int idx = g_nextCamIndex++;
+            auto cam = std::make_shared<CameraSession>(idx, info);
             fm = cam->modelDisplay();
             g_cams.push_back(std::move(cam));
         }
@@ -1189,7 +1203,7 @@ static bool writeGroupsJson(const std::string& json) {
 
 // определены ниже по файлу — нужны здесь, в разборе групп и в HTTP-обработчике
 static bool jsonGetStringArray(const std::string&, const std::string&, std::vector<std::string>&);
-static std::vector<cam::ICamera*> resolveTargetsByKey(const std::vector<std::string>&);
+static std::vector<std::shared_ptr<cam::ICamera>> resolveTargetsByKey(const std::vector<std::string>&);
 static std::string midiLastJson();
 
 // ---------------- привязки: горячая клавиша и MIDI-кнопка на группу ----------------
@@ -1307,11 +1321,11 @@ static void toggleRecGroup(const GroupBinding& g, const char* src) {
         return;
     }
     bool anyRec = false;
-    for (cam::ICamera* c : targets)
+    for (auto& c : targets)
         if (c->connected() && c->recording()) { anyRec = true; break; }
     const bool start = !anyRec;
     int ok = 0;
-    for (cam::ICamera* c : targets) if (c->command("rec", start ? "start" : "stop")) ++ok;
+    for (auto& c : targets) if (c->command("rec", start ? "start" : "stop")) ++ok;
     consolePrintf("[%s] Группа «%s»: %s записи, отправлено %d из %zu.\n",
                   src, g.name.c_str(), start ? "старт" : "стоп", ok, targets.size());
 }
@@ -1441,8 +1455,8 @@ static void discoverOnce(bool announce) {
                 if (!keyNew.empty() && k == keyNew) { exists = true; break; }
             }
             if (exists) continue;
-            int idx = static_cast<int>(g_cams.size()) + 1;
-            auto cam = std::make_unique<CameraSession>(idx, info);
+            int idx = g_nextCamIndex++;
+            auto cam = std::make_shared<CameraSession>(idx, info);
             fm = cam->modelDisplay();
             where = ip.empty() ? mac : ip;
             g_cams.push_back(std::move(cam));
@@ -1493,17 +1507,44 @@ static void discoverBmdOnce(bool announce) {
         for (auto& c : g_cams) {
             if (c->key() != key) continue;
             exists = true;
-            if (auto* b = dynamic_cast<bmd::BmdCamera*>(c.get())) b->updateHost(f.host, f.port);
+            if (auto* b = dynamic_cast<bmd::BmdCamera*>(c.get())) { b->touchSeen(); b->updateHost(f.host, f.port); }
             break;
         }
         if (exists) continue;
 
-        const int idx = static_cast<int>(g_cams.size()) + 1;
-        g_cams.push_back(std::make_unique<bmd::BmdCamera>(idx, f));
+        const const int idx = g_nextCamIndex++;
+        g_cams.push_back(std::make_shared<bmd::BmdCamera>(idx, f));
         if (announce)
             consolePrintf("Камера Blackmagic: %s (%s, %s)\n",
                           f.deviceName.c_str(), f.productName.c_str(), f.host.c_str());
     }
+}
+
+// Убрать камеры Blackmagic, которых давно нет ни в анонсах mDNS, ни на связи:
+// иначе после переезда в другую студию в панели копятся вчерашние карточки.
+// Камеры Sony не трогаем — они и так исчезают из панели, когда офлайн, а их
+// сессия держит хэндл SDK, который отпускать надо иначе.
+static void forgetLostBmdCams() {
+    std::vector<std::shared_ptr<cam::ICamera>> dropped;
+    {
+        std::lock_guard<std::mutex> lk(g_camsMutex);
+        const long long now = nowSteadyMs();
+        for (size_t i = 0; i < g_cams.size(); ) {
+            auto* b = dynamic_cast<bmd::BmdCamera*>(g_cams[i].get());
+            if (b && !b->connected() && now - b->lastSeenMs() > kForgetLostMs) {
+                consolePrintf("Камера Blackmagic пропала из сети — убираю из панели: %s\n",
+                              b->modelDisplay().c_str());
+                dropped.push_back(g_cams[i]);
+                g_cams.erase(g_cams.begin() + static_cast<long>(i));
+                continue;
+            }
+            ++i;
+        }
+    }
+    // Потоки останавливаем УЖЕ БЕЗ мьютекса: join под общей блокировкой подвесил
+    // бы и опрос статуса, и команды.
+    for (auto& c : dropped) c->finishRelease();
+    if (!dropped.empty()) wakeStatusBuild();
 }
 
 static void maybePrintCamSummary() {
@@ -1563,14 +1604,14 @@ static bool jsonGetStringArray(const std::string& body, const std::string& key,
 }
 
 // Resolve which cameras a /cmd targets ("all" or a 1-based number).
-static std::vector<cam::ICamera*> resolveTargets(const std::string& camStr) {
-    std::vector<cam::ICamera*> out;
+static std::vector<std::shared_ptr<cam::ICamera>> resolveTargets(const std::string& camStr) {
+    std::vector<std::shared_ptr<cam::ICamera>> out;
     std::lock_guard<std::mutex> lk(g_camsMutex);
     if (camStr == "all" || camStr == "\"all\"") {
-        for (auto& c : g_cams) out.push_back(c.get());
+        for (auto& c : g_cams) out.push_back(c);
     } else {
         int idx = std::atoi(camStr.c_str());
-        for (auto& c : g_cams) if (c->index() == idx) out.push_back(c.get());
+        for (auto& c : g_cams) if (c->index() == idx) out.push_back(c);
     }
     return out;
 }
@@ -1580,12 +1621,12 @@ static std::vector<cam::ICamera*> resolveTargets(const std::string& camStr) {
 // group REC starts every camera in the same pass instead of one HTTP call each.
 // Ключ камеры Sony — её IP, поэтому groups.json, написанные до появления второго
 // вендора, продолжают работать без миграции: там уже лежат ключи.
-static std::vector<cam::ICamera*> resolveTargetsByKey(const std::vector<std::string>& keys) {
-    std::vector<cam::ICamera*> out;
+static std::vector<std::shared_ptr<cam::ICamera>> resolveTargetsByKey(const std::vector<std::string>& keys) {
+    std::vector<std::shared_ptr<cam::ICamera>> out;
     std::lock_guard<std::mutex> lk(g_camsMutex);
     for (const std::string& k : keys)
         for (auto& c : g_cams)
-            if (c->key() == k) { out.push_back(c.get()); break; }
+            if (c->key() == k) { out.push_back(c); break; }
     return out;
 }
 
@@ -1612,7 +1653,7 @@ static coll::HttpResponse handleCmd(const std::string& body) {
 
     // Набор действий знает сама камера: у разных марок он разный.
     int okCount = 0;
-    for (cam::ICamera* c : targets)
+    for (auto& c : targets)
         if (c->command(action, value)) ++okCount;
 
     r.body = "{\"ok\":" + std::string(okCount > 0 ? "true" : "false") +
@@ -1908,11 +1949,11 @@ static void liveViewWorker() {
     const auto      frameGap = std::chrono::milliseconds(5);   // не ограничиваем, только уступаем CPU
     while (g_running.load()) {
         auto t0 = std::chrono::steady_clock::now();
-        std::vector<cam::ICamera*> cams;
+        std::vector<std::shared_ptr<cam::ICamera>> cams;
         { std::lock_guard<std::mutex> lk(g_camsMutex);
-          for (auto& c : g_cams) cams.push_back(c.get()); }
+          for (auto& c : g_cams) cams.push_back(c); }
         long long now = nowSteadyMs();
-        for (cam::ICamera* c : cams) {
+        for (auto& c : cams) {
             if (!c->connected()) continue;
             bool active;
             { std::lock_guard<std::mutex> lk(g_lvMutex);
@@ -2062,10 +2103,11 @@ int main() {
             addManualCamsOnce(true);      // cameras.txt: networks that block discovery
             reconnectKnownOnce(true);     // ранее найденные — по сохранённому адресу
             discoverBmdOnce(true);        // камеры Blackmagic по mDNS
-            std::vector<cam::ICamera*> cams;
+            forgetLostBmdCams();          // и убрать тех, кого давно не видно
+            std::vector<std::shared_ptr<cam::ICamera>> cams;
             { std::lock_guard<std::mutex> lk(g_camsMutex);
-              for (auto& c : g_cams) cams.push_back(c.get()); }
-            for (auto* c : cams) {
+              for (auto& c : g_cams) cams.push_back(c); }
+            for (auto& c : cams) {
                 if (!g_running.load()) break;
                 if (c->maybeRetryConnect())                       // issued a Connect?
                     std::this_thread::sleep_for(1000ms);          // serialize handshakes

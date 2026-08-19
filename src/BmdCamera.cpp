@@ -33,6 +33,11 @@ void blog(const char* fmt, ...) {
 
 constexpr const char* kApi = "/control/api/v1";
 
+long long nowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 // Полный опрос — раз в kFullEvery проходов: модель, формат, питание, экспозиция
 // меняются редко, а запись и таймкод нужны быстро.
 constexpr int kFullEvery = 5;
@@ -52,6 +57,7 @@ BmdCamera::BmdCamera(int index, const Found& f)
       m_deviceName(f.deviceName),
       m_host(f.host),
       m_port(f.port) {
+    touchSeen();
     m_thread = std::thread([this] { pollLoop(); });
 }
 
@@ -73,6 +79,8 @@ void BmdCamera::updateHost(const std::string& host, int port) {
         m_port = port;
     }
 }
+
+void BmdCamera::touchSeen() { m_lastSeenMs.store(nowMs()); }
 
 void BmdCamera::beginDisconnect() { m_run.store(false); }
 
@@ -337,6 +345,7 @@ void BmdCamera::pollOnce(bool full) {
     if (!rec.ok()) {
         const bool wasOnline = m_online.exchange(false);
         const bool apiOff    = (rec.status != 0);   // ответил по HTTP, но не успехом
+        if (apiOff) touchSeen();                    // отвечает — значит камера в сети
         if (m_apiOff.exchange(apiOff) != apiOff && apiOff)
             blog("[BMD %s] найдена, но REST-управление не включено (Web Media Manager).\n",
                  m_deviceName.c_str());
@@ -348,6 +357,7 @@ void BmdCamera::pollOnce(bool full) {
         return;
     }
 
+    touchSeen();                       // ответила — значит на месте
     if (!m_online.exchange(true))
         blog("[BMD %s] ПОДКЛЮЧЕНА (%s, %s).\n", m_deviceName.c_str(), m_model.c_str(), host.c_str());
     m_apiOff.store(false);

@@ -66,6 +66,11 @@ public:
     // Адрес мог смениться (DHCP) — камера та же, ключ тот же.
     void updateHost(const std::string& host, int port);
 
+    // Камеру видно в сети (анонс mDNS или живой ответ). По этой отметке
+    // решается, не пора ли убрать пропавшую камеру из панели.
+    void      touchSeen();
+    long long lastSeenMs() const { return m_lastSeenMs.load(); }
+
 private:
     void pollLoop();
     void pollOnce(bool full);          // снимок состояния обычным REST
@@ -110,6 +115,7 @@ private:
     std::string        m_host;
     int                m_port = 80;
 
+    std::atomic<long long> m_lastSeenMs{0};
     std::atomic<bool>  m_online{false};
     std::atomic<bool>  m_rec{false};
     // Камера найдена, но REST-управление на ней не включено (Web Media Manager).

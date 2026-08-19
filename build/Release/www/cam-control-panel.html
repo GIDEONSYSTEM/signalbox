@@ -1378,7 +1378,7 @@ function buildBmdCard(cam){
     <div class="crow"><div class="cinfo"><div class="ctop">
       <div class="cam">${modelName(cam.model)}</div>
       <div class="bmd-tally">tally</div>
-      <div class="bmd-lost">нет связи</div>
+      <div class="bmd-lost">Offline</div>
       <div class="bmd-tc">--:--:--:--</div>
       <div class="rec-btn off" title="Управление записью для Blackmagic ещё не подключено"><span class="ic"></span><span class="t">REC</span></div>
     </div></div></div>
@@ -1481,8 +1481,7 @@ function updateBmdCard(e, d){
     e.offMsg.innerHTML = apiOff
       ? 'Камера найдена, но <b>REST-управление не включено</b>.<br>' +
         'Blackmagic Camera Setup → вкладка сети → включить Web Media Manager.'
-      : 'Камера <b>не отвечает</b> — управление недоступно.<br>' +
-        'Проверьте питание камеры и кабель Ethernet.';
+      : 'Камера <b>не отвечает</b> — управление недоступно.';
   }
   e.name.textContent = d.name || '';
   // Во время записи оператору нужна ДЛИТЕЛЬНОСТЬ (timeline у камеры), а не часы:
