@@ -60,6 +60,7 @@ message(STATUS "SignalBox версия ${SIGNALBOX_VERSION}")
 add_executable(SignalBox
     src/main.cpp
     src/CameraSession.cpp
+    src/BmdCamera.cpp
     src/CameraSession.h
     src/HttpServer.h
     src/UpdateAsset.h

@@ -7,13 +7,16 @@
 // сокетный шим с сервером (net/Socket.h), а не живёт в платформенном слое —
 // сокеты BSD одинаковы везде.
 //
-// Осознанное упрощение: запрос уходит с "Connection: close", ответ читается до
-// закрытия сокета. Поэтому не нужен разбор chunked — камера Blackmagic отдаёт
-// Content-Length и закрывает соединение. Для сервера общего назначения так
-// нельзя, для одного известного API — ровно то, что надо.
+// 🔴 Ответ читается по Content-Length, а НЕ «до закрытия сокета». Замерено на
+// живой PYXIS: камера присылает ответ сразу, но соединение НЕ закрывает, хотя мы
+// послали "Connection: close". Чтение до EOF упиралось в таймаут на КАЖДОМ
+// запросе — 2.5 с вместо миллисекунд, полный опрос камеры занимал 35 с.
+// Если Content-Length нет (или Transfer-Encoding: chunked) — откатываемся на
+// чтение до закрытия, чтобы не зависнуть навсегда: таймаут ограничит сверху.
 
 #include "Socket.h"
 
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <string>
@@ -100,20 +103,54 @@ inline Resp request(const std::string& host, int port,
         sent += static_cast<size_t>(n);
     }
 
+    // Регистронезависимый поиск заголовка: имена заголовков регистра не имеют.
+    auto findHeader = [](const std::string& h, const char* name) -> std::string {
+        std::string low; low.reserve(h.size());
+        for (char c : h) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        std::string key = name;                       // уже в нижнем регистре
+        size_t k = low.find("\r\n" + key + ":");
+        if (k == std::string::npos) return {};
+        k += 2 + key.size() + 1;
+        size_t e = low.find("\r\n", k);
+        std::string v = h.substr(k, e == std::string::npos ? std::string::npos : e - k);
+        size_t b = v.find_first_not_of(" \t");
+        return b == std::string::npos ? std::string() : v.substr(b);
+    };
+
     std::string raw; char buf[4096];
+    size_t hdrEnd = std::string::npos;
+    long long want = -1;            // сколько байт тела ждём; -1 = неизвестно
+
     for (;;) {
+        if (hdrEnd == std::string::npos) {
+            hdrEnd = raw.find("\r\n\r\n");
+            if (hdrEnd != std::string::npos) {
+                const std::string head = raw.substr(0, hdrEnd + 2);
+                size_t sp = head.find(' ');
+                if (sp != std::string::npos) r.status = std::atoi(head.c_str() + sp + 1);
+                const std::string cl = findHeader(head, "content-length");
+                if (!cl.empty())                       want = std::atoll(cl.c_str());
+                else if (r.status == 204 || r.status == 304) want = 0;
+            }
+        }
+        if (hdrEnd != std::string::npos && want >= 0 &&
+            raw.size() >= hdrEnd + 4 + static_cast<size_t>(want))
+            break;                                     // тело получено целиком
+
         int n = coll::recvSome(s, buf, sizeof(buf));
-        if (n > 0)      raw.append(buf, static_cast<size_t>(n));
-        else            break;   // 0 = закрытие, <0 = таймаут/ошибка
+        if (n > 0) { raw.append(buf, static_cast<size_t>(n)); continue; }
+        break;                                         // 0 = закрытие, <0 = таймаут
     }
     coll::closeSocket(s);
 
     if (raw.empty()) { r.err = "empty response"; return r; }
-    // Статус-строка: "HTTP/1.1 200 OK"
-    size_t sp = raw.find(' ');
-    if (sp != std::string::npos) r.status = std::atoi(raw.c_str() + sp + 1);
-    size_t hdrEnd = raw.find("\r\n\r\n");
+    if (r.status == 0) {
+        size_t sp = raw.find(' ');
+        if (sp != std::string::npos) r.status = std::atoi(raw.c_str() + sp + 1);
+    }
+    if (hdrEnd == std::string::npos) hdrEnd = raw.find("\r\n\r\n");
     r.body = (hdrEnd == std::string::npos) ? std::string() : raw.substr(hdrEnd + 4);
+    if (want >= 0 && r.body.size() > static_cast<size_t>(want)) r.body.resize(static_cast<size_t>(want));
     return r;
 }
 
