@@ -11,6 +11,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace jsonr {
 
@@ -60,6 +61,21 @@ inline bool boolean(const std::string& j, const std::string& key, bool def = fal
     size_t k = valuePos(j, key);
     if (k == std::string::npos) return def;
     return j.compare(k, 4, "true") == 0;
+}
+
+// Массив чисел: "ключ":[1,2,3]. Пустой, если ключа нет или это не массив.
+inline std::vector<long long> numArray(const std::string& j, const std::string& key) {
+    std::vector<long long> out;
+    size_t k = valuePos(j, key);
+    if (k == std::string::npos || k >= j.size() || j[k] != '[') return out;
+    ++k;
+    while (k < j.size() && j[k] != ']') {
+        while (k < j.size() && (j[k] == ' ' || j[k] == ',')) ++k;
+        if (k >= j.size() || j[k] == ']') break;
+        out.push_back(std::atoll(j.c_str() + k));
+        while (k < j.size() && j[k] != ',' && j[k] != ']') ++k;
+    }
+    return out;
 }
 
 // Число внутри под-объекта: сначала находим "obj", потом "key" после него.

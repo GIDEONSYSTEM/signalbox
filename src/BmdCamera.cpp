@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -97,7 +99,11 @@ std::string BmdCamera::statusJson() {
 void BmdCamera::pollLoop() {
     int tick = 0;
     while (m_run.load()) {
-        pollOnce(tick % kFullEvery == 0);
+        // Пока есть неподтверждённая запись — опрашиваем полно каждый проход,
+        // иначе сверка ждала бы до пяти секунд.
+        bool waiting;
+        { std::lock_guard<std::mutex> lk(m_pendMx); waiting = !m_pending.empty(); }
+        pollOnce(waiting || tick % kFullEvery == 0);
         ++tick;
         for (int k = 0; k < 10 && m_run.load(); ++k) std::this_thread::sleep_for(100ms);
     }
@@ -114,17 +120,22 @@ void BmdCamera::pollOnce(bool full) {
     net::Resp rec = api("/transports/0/record");
 
     // 🔴 Камера видна в сети, но control-API не отвечает — почти наверняка на ней
-    // не включён Web Media Manager. Это НЕ «камера сломалась»: в §15.1 показано,
-    // что при выключенном управлении любой путь отвечает 307/404 одинаково.
-    if (rec.status == 0 || rec.status == 404) {
+    // не включён Web Media Manager. Это НЕ «камера сломалась»: при выключенном
+    // управлении камера отвечает на ЛЮБОЙ путь 307-редиректом на тот же путь со
+    // слэшем, а по нему — 404 (§15.1).
+    // ⚠️ Проверять надо именно «ответ не 2xx», а не только 404: редиректы мы не
+    // ходим, поэтому от выключенной камеры приходит 307, и если считать провалом
+    // лишь 0 и 404, камера попадёт в панель как рабочая, но с пустыми полями —
+    // ровно это и наблюдалось на двух камерах студии.
+    if (!rec.ok()) {
         const bool wasOnline = m_online.exchange(false);
-        const bool apiOff    = (rec.status == 404);
+        const bool apiOff    = (rec.status != 0);   // ответил по HTTP, но не успехом
         if (m_apiOff.exchange(apiOff) != apiOff && apiOff)
             blog("[BMD %s] найдена, но REST-управление не включено (Web Media Manager).\n",
                  m_deviceName.c_str());
         if (wasOnline)
             blog("[BMD %s] связь потеряна (%s).\n", m_deviceName.c_str(),
-                 rec.status == 404 ? "API выключен" : rec.err.c_str());
+                 apiOff ? "REST-управление выключено" : rec.err.c_str());
         std::lock_guard<std::mutex> lk(m_cacheMx);
         m_cache.clear();
         return;
@@ -162,6 +173,17 @@ void BmdCamera::pollOnce(bool full) {
         m_slow.iris = jsonr::real(iris, "apertureStop", &f);
         if (!f) m_slow.iris = -1.0;
         m_slow.irisControllable = jsonr::boolean(api("/lens/iris/description").body, "controllable");
+        m_slow.autoExposure = jsonr::str(api("/video/autoExposure").body, "mode");
+        // Списки допустимых значений — только от камеры, никаких своих таблиц.
+        m_slow.isoOpts     = jsonr::numArray(api("/video/supportedISOs").body,  "supportedISOs");
+        m_slow.gainOpts    = jsonr::numArray(api("/video/supportedGains").body, "supportedGains");
+        m_slow.shutterOpts = jsonr::numArray(api("/video/supportedShutters").body, "shutterSpeeds");
+        const std::string wbd = api("/video/whiteBalance/description").body;
+        m_slow.wbMin = jsonr::numIn(wbd, "whiteBalance", "min");
+        m_slow.wbMax = jsonr::numIn(wbd, "whiteBalance", "max");
+        const std::string td = api("/video/whiteBalanceTint/description").body;
+        m_slow.tintMin = jsonr::numIn(td, "whiteBalanceTint", "min", 0);
+        m_slow.tintMax = jsonr::numIn(td, "whiteBalanceTint", "max", 0);
     }
 
     // Фрагмент /status.json — СВОЙ, не сониевский: здесь нет перегрева и уровня
@@ -199,19 +221,103 @@ void BmdCamera::pollOnce(bool full) {
     } else {
         j += "\"iris\":null,";
     }
-    j += "\"irisControllable\":" + std::string(jsonw::boolStr(m_slow.irisControllable));
+    j += "\"irisControllable\":" + std::string(jsonw::boolStr(m_slow.irisControllable)) + ",";
+    j += "\"autoExposure\":\"" + jsonw::esc(m_slow.autoExposure) + "\",";
+    auto arr = [](const std::vector<long long>& v) {
+        std::string s = "[";
+        for (size_t i = 0; i < v.size(); ++i) { if (i) s += ","; s += std::to_string(v[i]); }
+        return s + "]";
+    };
+    j += "\"isoOpts\":"     + arr(m_slow.isoOpts) + ",";
+    j += "\"gainOpts\":"    + arr(m_slow.gainOpts) + ",";
+    j += "\"shutterOpts\":" + arr(m_slow.shutterOpts) + ",";
+    j += "\"wbRange\":"     + ((m_slow.wbMin > 0 && m_slow.wbMax > 0)
+             ? "[" + std::to_string(m_slow.wbMin) + "," + std::to_string(m_slow.wbMax) + "]"
+             : std::string("null")) + ",";
+    j += "\"tintRange\":[" + std::to_string(m_slow.tintMin) + "," + std::to_string(m_slow.tintMax) + "]";
     j += "}";
 
-    std::lock_guard<std::mutex> lk(m_cacheMx);
-    m_cache = std::move(j);
+    { std::lock_guard<std::mutex> lk(m_cacheMx); m_cache = std::move(j); }
+
+    if (full) reconcile();
 }
 
-// Шаг 2 — только чтение. Запись (REC, экспозиция, ББ) появится на шаге 3-4,
-// вместе со сверкой применения: у BM код 204 не означает, что подействовало.
+// Записать целое свойство и запомнить, чего ждём (сверку делает reconcile()).
+bool BmdCamera::writeNum(const std::string& path, const std::string& field, long long v) {
+    std::string host; int port;
+    { std::lock_guard<std::mutex> lk(m_hostMx); host = m_host; port = m_port; }
+    if (host.empty()) return false;
+
+    const std::string body = "{\"" + field + "\":" + std::to_string(v) + "}";
+    const net::Resp r = net::put(host, port, std::string(kApi) + path, body, 3000);
+
+    // 403 — камера прямо говорит «сейчас это менять нельзя» (например, значением
+    // управляет автоэкспозиция). Это не наша ошибка и настаивать бессмысленно.
+    if (r.status == 403) {
+        blog("[BMD %s] %s: камера сейчас не даёт менять это значение.\n", m_deviceName.c_str(), field.c_str());
+        return false;
+    }
+    if (!r.ok()) {
+        blog("[BMD %s] %s=%lld: не принято (код %d%s%s).\n", m_deviceName.c_str(), field.c_str(),
+             v, r.status, r.err.empty() ? "" : ", ", r.err.c_str());
+        return false;
+    }
+    { std::lock_guard<std::mutex> lk(m_pendMx);
+      Pending p; p.path = path; p.field = field; p.want = v; p.tries = 0;
+      m_pending[field] = p; }
+    return true;
+}
+
+// Сверяем то, что просили, с тем, что камера показывает на самом деле.
+void BmdCamera::reconcile() {
+    std::vector<Pending> retry;
+    {
+        std::lock_guard<std::mutex> lk(m_pendMx);
+        for (auto it = m_pending.begin(); it != m_pending.end(); ) {
+            long long cur = -1;
+            const std::string& f = it->second.field;
+            if      (f == "iso")              cur = m_slow.iso;
+            else if (f == "gain")             cur = m_slow.gain;
+            else if (f == "whiteBalance")     cur = m_slow.wb;
+            else if (f == "whiteBalanceTint") cur = m_slow.tint;
+            else if (f == "shutterSpeed")     cur = m_slow.shutter;
+
+            if (cur == it->second.want) { it = m_pending.erase(it); continue; }
+            if (++it->second.tries > kSetRetries) {
+                blog("[BMD %s] %s: просили %lld, камера держит %lld — больше не настаиваю.\n",
+                     m_deviceName.c_str(), f.c_str(), it->second.want, cur);
+                it = m_pending.erase(it);
+                continue;
+            }
+            retry.push_back(it->second);
+            ++it;
+        }
+    }
+    std::string host; int port;
+    { std::lock_guard<std::mutex> lk(m_hostMx); host = m_host; port = m_port; }
+    for (const Pending& p : retry) {
+        const std::string body = "{\"" + p.field + "\":" + std::to_string(p.want) + "}";
+        net::put(host, port, std::string(kApi) + p.path, body, 3000);
+    }
+}
+
+// Действия, которые понимает камера Blackmagic. Имена те же, что у Sony, чтобы
+// групповые команды и привязки не зависели от марки.
 bool BmdCamera::command(const std::string& action, const std::string& value) {
-    (void)value;
-    blog("[BMD %s] действие «%s»: управление BM пока не подключено (только чтение).\n",
-         m_deviceName.c_str(), action.c_str());
+    const long long v = std::atoll(value.c_str());
+    if (action == "iso")      return writeNum("/video/iso", "iso", v);
+    if (action == "gain")     return writeNum("/video/gain", "gain", v);
+    if (action == "wbkelvin") return writeNum("/video/whiteBalance", "whiteBalance", v);
+    if (action == "tint")     return writeNum("/video/whiteBalanceTint", "whiteBalanceTint", v);
+    // Выдержка: пишем скоростью (1/N). У камеры есть и режим угла, приоритет по
+    // спеке — shutterSpeed выше shutterAngle.
+    if (action == "shutter")  return writeNum("/video/shutter", "shutterSpeed", v);
+    if (action == "rec") {
+        blog("[BMD %s] запись пока не подключена (нужна проверка на камере с картой).\n",
+             m_deviceName.c_str());
+        return false;
+    }
+    blog("[BMD %s] действие «%s» эта камера не умеет.\n", m_deviceName.c_str(), action.c_str());
     return false;
 }
 

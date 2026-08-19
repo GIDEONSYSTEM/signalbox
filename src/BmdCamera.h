@@ -11,9 +11,11 @@
 
 #include <atomic>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace bmd {
 
@@ -61,6 +63,26 @@ private:
     void pollLoop();
     void pollOnce(bool full);
 
+    // 🔴 Сверка применения. У BM код 204 значит «команда принята», а НЕ
+    // «подействовало» (§15.4): камера может молча не применить значение — так
+    // было с записью без карты. Поэтому после записи запоминаем, чего ждём, и
+    // сверяем на следующих проходах; не сошлось — досылаем, но ограниченное
+    // число раз, иначе программа будет спорить с человеком, крутящим ручку на
+    // самой камере (тот же приём, что reconcileLocked у Sony).
+    struct Pending {
+        std::string path;      // "/video/iso"
+        std::string field;     // "iso"
+        long long   want = 0;
+        int         tries = 0;
+    };
+    static constexpr int kSetRetries = 3;
+
+    bool writeNum(const std::string& path, const std::string& field, long long v);
+    void reconcile();          // только из потока опроса
+
+    std::mutex                      m_pendMx;
+    std::map<std::string, Pending>  m_pending;   // поле -> чего ждём
+
     int                m_index;
     std::string        m_idLabel;
     std::string        m_uniqueId;
@@ -88,6 +110,10 @@ private:
         long long   iso = -1, gain = -1, wb = -1, tint = -1, shutter = -1;
         double      iris = -1.0;
         bool        irisControllable = false;
+        // Допустимые значения отдаёт САМА камера — зашитых таблиц нет (§10.0.1).
+        std::vector<long long> isoOpts, gainOpts, shutterOpts;
+        long long   wbMin = -1, wbMax = -1, tintMin = 0, tintMax = 0;
+        std::string autoExposure;
     };
     Slow               m_slow;            // только из pollLoop
 
