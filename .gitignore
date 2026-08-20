@@ -19,6 +19,7 @@ cameras.txt
 cameras-known.txt
 groups.json
 settings.json
+cardlayout.json
 firewall-skip.txt
 *.log
 *.log.prev

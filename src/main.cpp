@@ -500,7 +500,8 @@ static int applyUpdate(const std::string& cmdLine) {
     std::this_thread::sleep_for(700ms);           // дать ОС отпустить DLL
 
     // Копируем поверх, не удаляя лишнее в приёмнике: данные установки
-    // (cameras.txt, groups.json, settings.json) в архив не входят и должны пережить обновление.
+    // (cameras.txt, groups.json, settings.json, cardlayout.json) в архив не входят
+    // и должны пережить обновление.
     // На macOS данные и так лежат вне бандла (см. plat::dataDir), но правило то же.
     const std::string src = plat::joinPath(updateStagingDir(), payloadName());
     if (!plat::copyTree(src, target)) {
@@ -1201,6 +1202,38 @@ static bool writeGroupsJson(const std::string& json) {
     return plat::writeFile(groupsPath(), json);
 }
 
+// ---------------- раскладка карточек в панели ----------------
+// Что показывать в карточке камеры и в каком порядке. Схемой владеет ПАНЕЛЬ
+// ({"sony":["iso","shutter",...],"bmd":[...]}), сервер только хранит — тот же
+// уклад, что и с groups.json выше, и по той же причине: набор параметров и их
+// имена знает панель, серверу в них лезть незачем.
+//
+// 🔴 Раскладка ОДНА НА МАРКУ и одна на студию, а не на устройство: настроили на
+// ноутбуке — то же самое видят док OBS и телефон оператора. Этим она и
+// отличается от свёрнутых групп, которые нарочно живут в браузере: там у
+// каждого оператора свой зал, здесь — общий вид карточек.
+//
+// Файла нет (никто ничего не настраивал) — отдаём пустой объект: набор по
+// умолчанию тоже знает панель, и дублировать его здесь означало бы завести
+// второй источник правды.
+static std::mutex g_layoutMutex;
+
+static std::string cardLayoutPath() { return plat::joinPath(plat::dataDir(), "cardlayout.json"); }
+
+static std::string readCardLayoutJson() {
+    std::lock_guard<std::mutex> lk(g_layoutMutex);
+    std::string s;
+    if (!plat::readFile(cardLayoutPath(), s)) return "{}";
+    if (s.size() >= 3 && static_cast<unsigned char>(s[0]) == 0xEF) s.erase(0, 3);   // BOM
+    if (s.find('{') == std::string::npos) return "{}";
+    return s;
+}
+
+static bool writeCardLayoutJson(const std::string& json) {
+    std::lock_guard<std::mutex> lk(g_layoutMutex);
+    return plat::writeFile(cardLayoutPath(), json);
+}
+
 // определены ниже по файлу — нужны здесь, в разборе групп и в HTTP-обработчике
 static bool jsonGetStringArray(const std::string&, const std::string&, std::vector<std::string>&);
 static std::vector<std::shared_ptr<cam::ICamera>> resolveTargetsByKey(const std::vector<std::string>&);
@@ -1754,6 +1787,35 @@ static coll::HttpResponse handleRequest(const coll::HttpRequest& req, const std:
         }
         // Состав групп и привязки изменились — перечитать и переназначить клавиши.
         reloadBindingsAndHotkeys();
+        rr.body = "{\"ok\":true}";
+        return rr;
+    }
+    if (req.method == "GET" && req.path == "/cardlayout.json") {
+        r.contentType = "application/json; charset=utf-8";
+        r.body = readCardLayoutJson();
+        return r;
+    }
+    if (req.method == "POST" && req.path == "/cardlayout/save") {
+        coll::HttpResponse rr;
+        rr.contentType = "application/json; charset=utf-8";
+        // Единственный писатель — панель, она же владеет схемой. Проверяем лишь
+        // то, что это похоже на JSON-объект вменяемого размера: раскладка — это
+        // два коротких списка имён, мегабайты здесь взяться неоткуда.
+        const std::string& b = req.body;
+        const size_t open  = b.find_first_not_of(" \t\r\n");
+        const size_t close = b.find_last_not_of(" \t\r\n");
+        if (b.size() > 65536 || open == std::string::npos ||
+            b[open] != '{' || close == std::string::npos || b[close] != '}') {
+            rr.status = 400; rr.statusText = "Bad Request";
+            rr.body = "{\"ok\":false,\"error\":\"ожидался JSON-объект\"}";
+            return rr;
+        }
+        if (!writeCardLayoutJson(b)) {
+            rr.status = 500; rr.statusText = "Internal Server Error";
+            rr.body = "{\"ok\":false,\"error\":\"не удалось записать cardlayout.json\"}";
+            return rr;
+        }
+        // Перечитывать нечего: сервер раскладку не использует, только хранит.
         rr.body = "{\"ok\":true}";
         return rr;
     }

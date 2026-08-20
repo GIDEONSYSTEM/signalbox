@@ -12,7 +12,7 @@
 #     обновления ищет ровно это имя (payloadName() в main.cpp);
 #   * метка «-mac» в имени файла обязательна: по ней приложение выбирает свою
 #     сборку из релиза, где лежат обе (см. src/UpdateAsset.h);
-#   * данные студии (cameras.txt, groups.json, ...) внутрь попасть не могут в
+#   * данные студии (cameras.txt, groups.json, cardlayout.json, ...) внутрь попасть не могут в
 #     принципе: с переходом на бандл они живут в ~/Library/Application Support/
 #     SignalBox. Проверка на них всё равно осталась — дешевле, чем повторить
 #     историю §7, где первый архив уехал с cameras.txt внутри;
@@ -83,7 +83,7 @@ done
 
 echo "  проверяю, что данных установки внутри нет"
 LEAKED=""
-for bad in cameras.txt cameras-known.txt groups.json settings.json firewall-skip.txt; do
+for bad in cameras.txt cameras-known.txt groups.json settings.json cardlayout.json firewall-skip.txt; do
     if find "$STAGE/SignalBox.app" -name "$bad" | grep -q .; then LEAKED="$LEAKED $bad"; fi
 done
 if find "$STAGE/SignalBox.app" -name '*.log' | grep -q .; then LEAKED="$LEAKED логи"; fi

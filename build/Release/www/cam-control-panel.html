@@ -264,9 +264,14 @@
   .oh-badge svg{width:17px; height:17px; display:block;}
   .card.overheat .oh-badge{display:inline-flex;}
 
-  /* Экспозиция одной строкой: ISO · Shutter · Aperture. Кнопка ЗАПИСЬ отсюда
-     переехала в шапку карточки — к модели и остатку карты. */
-  .controls{display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px;}
+  /* 🔴 СЕТКА ПАРАМЕТРОВ КАРТОЧКИ — по три в ряд, строк сколько нужно.
+     Раньше здесь было два жёстких ряда (.controls — экспозиция, .controls2 —
+     звук и ББ). Теперь состав и порядок задаёт оператор в Настройках, и ряды
+     получаются сами: седьмой параметр заводит третью строку. Метрики самих
+     регуляторов заданы ниже ОДИН раз на все ряды — иначе они разъезжаются по
+     высоте, это уже было. */
+  .card-params{display:grid; grid-template-columns:repeat(3, 1fr); gap:6px;}
+  .card-params:empty{display:none;}     /* все параметры убраны — не оставляем пустой отступ */
 
   /* REC button — теперь живёт в строке шапки (.ctop), поэтому компактная:
      высота по строке, а не по блоку регуляторов. */
@@ -293,7 +298,7 @@
   .iso-eff:empty{display:none;}
   /* ряд «− значение +» — общий для всех регуляторов карточки */
   .ctl-row{flex:none; display:flex; align-items:center; justify-content:center;
-        gap:3px; min-width:0;}
+        gap:3px; min-width:0; min-height:28px;}
   .step{flex:none; width:19px; height:24px; border-radius:5px; border:1px solid var(--edge);
         background:#1c222b; color:var(--ink); font-family:var(--mono); font-weight:800; font-size:13px;
         cursor:pointer; display:flex; align-items:center; justify-content:center; user-select:none;}
@@ -311,9 +316,6 @@
   /* нечего перебирать (камера отдала одно значение или ни одного) — гасим стрелки */
   .step.off{opacity:.35; pointer-events:none;}
 
-  /* вторая строка регуляторов: Mic Gain · WB. Метрики общие с первой строкой
-     (см. блок выше), здесь только раскладка колонками. */
-  .controls2{display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px;}
   /* ---- карточка Blackmagic ---- */
   .bmd-name{font-size:11px; color:var(--ink); font-weight:600; white-space:nowrap;}
   .bmd-tc{font-family:var(--mono); font-size:12px; color:var(--ink); white-space:nowrap; margin-left:auto;}
@@ -335,7 +337,7 @@
   .bmd-off{display:none; margin-top:9px; padding:8px 10px; border-radius:8px; font-size:11px; line-height:1.5;
            background:rgba(255,170,0,.08); border:1px solid rgba(255,170,0,.35); color:var(--warn, #ffaa00);}
   .card.unavail .bmd-off{display:block;}
-  .card.unavail .controls, .card.unavail .controls2, .card.unavail .bmd-fmt{opacity:.35; pointer-events:none;}
+  .card.unavail .card-params, .card.unavail .bmd-fmt{opacity:.35; pointer-events:none;}
   .card.unavail .rec-btn, .card.unavail .bmd-tc, .card.unavail .bmd-tally{opacity:.35;}
   /* Не отвечает — это иная беда, чем выключенное управление: другой цвет. */
   .card.is-lost{border-color:rgba(255,77,77,.45);}
@@ -345,6 +347,12 @@
   .card.is-lost .bmd-lost{display:block;}
   .card.unavail .cam{opacity:.55;}
   .ctl{display:flex; flex-direction:column; gap:3px; min-width:0;}
+  .ctl.na{display:none;}                /* камера этот параметр не отдаёт */
+  /* Параметр «только чтение» (диафрагма и автоэкспозиция у Blackmagic): без
+     стрелок. Высоту держит сам ряд (min-height выше), поэтому строки сетки
+     сходятся с рядами, где стрелки есть. */
+  .ctl-row .ro{display:flex; align-items:center; justify-content:center;}
+  .ctl-row .ro.dim{opacity:.45;}      /* камера говорит, что этим сейчас не порулить */
   /* line-height и nowrap — те же, что у подписи первого ряда: без этого строки
      подписей разной высоты и ряды не сходятся по вертикали */
   .ctl-lab{font-family:var(--cond); font-weight:600; letter-spacing:.08em; font-size:9px;
@@ -424,7 +432,7 @@
             align-items:center; justify-content:center; padding:20px;
             background:rgba(6,8,11,.72);}
   .settings.show{display:flex;}
-  .set-card{display:flex; width:min(760px,100%); max-height:min(560px,90vh);
+  .set-card{display:flex; width:min(940px,100%); max-height:min(620px,90vh);
             background:var(--panel); border:1px solid var(--edge); border-radius:14px;
             overflow:hidden; box-shadow:0 24px 70px rgba(0,0,0,.55);}
   .set-side{flex:none; width:186px; background:rgba(255,255,255,.02);
@@ -446,8 +454,77 @@
   .set-h{font-family:var(--cond); font-weight:700; letter-spacing:.07em; font-size:12px;
          text-transform:uppercase; color:var(--ink); margin:0 30px 6px 0;}
   .set-note{font-size:11px; line-height:1.5; color:var(--idle); margin-bottom:11px;}
+  .set-h.sep{margin-top:18px; padding-top:15px; border-top:1px solid var(--edge-2);}
   /* внутри настроек блоки занимают всю ширину окна */
   .set-pane .share, .set-pane .upd{max-width:none; margin:0;}
+
+  /* ---- конструктор карточки: Настройки → Камеры → Sony / Blackmagic ----
+     Марки разворачиваются по очереди: у Sony и Blackmagic наборы параметров
+     разные, и общего списка тут быть не может. */
+  .vend{border:1px solid var(--edge); border-radius:11px; background:var(--panel-2);
+        margin-bottom:8px; overflow:hidden;}
+  .vend-head{width:100%; display:flex; align-items:center; gap:9px; background:none; border:0;
+             cursor:pointer; padding:10px 12px; color:var(--ink); font-family:var(--cond);
+             font-weight:700; letter-spacing:.06em; text-transform:uppercase; font-size:12px;}
+  .vend-head:hover{background:rgba(255,255,255,.04);}
+  .vend-head .tri{color:var(--ink-dim); font-size:10px; line-height:1; transition:transform .2s ease;}
+  .vend.open .vend-head .tri{transform:rotate(90deg);}
+  .vend-head .n{margin-left:auto; font-family:var(--ui); font-weight:600; letter-spacing:0;
+                text-transform:none; font-size:11px; color:var(--idle);}
+  .vend-body{display:none; padding:2px 12px 12px;}
+  .vend.open .vend-body{display:block;}
+  .lay-wrap{display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap;}
+  .lay-left{flex:0 0 auto; width:392px; max-width:100%;}
+  .lay-right{flex:1 1 210px; min-width:200px;}
+  .lay-cap{font-family:var(--cond); font-weight:600; letter-spacing:.08em; font-size:9px;
+           text-transform:uppercase; color:var(--idle); margin-bottom:6px;}
+  .lay-hint{font-size:10px; line-height:1.45; color:var(--idle); margin-top:7px;}
+
+  /* Карточка-образец. Всё, кроме сетки параметров, — постоянная часть: шапка,
+     строка «Группа» и Live Preview. Гасим её и отключаем нажатия, чтобы было
+     видно, что настраивается только середина. */
+  .lay-card{margin:0; animation:none; opacity:1; transform:none; cursor:default;}
+  .lay-card .crow, .lay-card .card-grp, .lay-card .lv, .lay-card .bmd-fmt{opacity:.5; pointer-events:none;}
+  .lay-card .ctl-row{pointer-events:none;}          /* органы в образце не боевые */
+  .lay-card .ctl.na{display:flex; opacity:.55;}     /* показываем и то, чего сейчас нет у камеры */
+  .lay-card .card-params{display:grid; min-height:46px; padding:5px; margin:0 -5px;
+                         border:1px dashed var(--edge-2); border-radius:9px;}
+  .lay-card .card-params.drag-over{border-color:rgba(65,214,126,.55); background:rgba(65,214,126,.05);}
+  .lay-item{position:relative; cursor:grab; border-radius:8px;}
+  .lay-item:hover{outline:1px dashed rgba(255,255,255,.25); outline-offset:2px;
+                  background:rgba(255,255,255,.04);}
+  .lay-item.lay-drag{opacity:.3;}
+  .lay-item.drop-before{box-shadow:inset 3px 0 0 -1px var(--ok);}
+  .lay-item.drop-after{box-shadow:inset -3px 0 0 -1px var(--ok);}
+  .lay-x{position:absolute; top:-6px; right:-4px; width:17px; height:17px; padding:0;
+         border-radius:50%; border:1px solid var(--edge); background:var(--panel);
+         color:var(--ink-dim); font-size:9px; line-height:1; cursor:pointer;
+         display:none; align-items:center; justify-content:center; pointer-events:auto;}
+  .lay-item:hover .lay-x{display:flex;}
+  .lay-x:hover{color:var(--crit); border-color:rgba(255,77,77,.5);}
+  .lay-empty{grid-column:1 / -1; text-align:center; padding:12px 6px; font-size:10px;
+             color:var(--idle); font-family:var(--cond); letter-spacing:.06em; text-transform:uppercase;}
+
+  /* Список того, что можно добавить: только параметры, которых сейчас в
+     карточке нет. Пустой список означает «всё уже в карточке». */
+  .lay-pool{display:flex; flex-direction:column; gap:5px; min-height:46px; padding:5px;
+            border:1px dashed var(--edge-2); border-radius:9px;}
+  .lay-pool.drag-over{border-color:rgba(255,77,77,.5); background:rgba(255,77,77,.06);}
+  .pool-item{display:flex; align-items:center; gap:7px; padding:6px 8px; cursor:grab;
+             background:var(--panel); border:1px solid var(--edge); border-radius:8px;}
+  .pool-item:hover{border-color:rgba(255,255,255,.2);}
+  .pool-item .t{font-size:11px; color:var(--ink); white-space:nowrap;}
+  .pool-item .d{font-size:10px; color:var(--idle); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .pool-item .add{margin-left:auto; flex:none; width:19px; height:19px; border-radius:6px;
+                  border:1px solid var(--edge); background:#1c222b; color:var(--ink);
+                  font-family:var(--mono); font-weight:800; font-size:12px; line-height:1;
+                  cursor:pointer; display:flex; align-items:center; justify-content:center;}
+  .pool-item .add:hover{color:var(--ok); border-color:rgba(65,214,126,.45);}
+  .pool-empty{font-size:10px; color:var(--idle); text-align:center; padding:10px 4px;}
+  .lay-reset{margin-top:8px; background:var(--panel-2); border:1px solid var(--edge); border-radius:7px;
+             color:var(--ink-dim); padding:5px 10px; cursor:pointer; font-family:var(--cond);
+             font-weight:700; letter-spacing:.06em; font-size:10px; text-transform:uppercase;}
+  .lay-reset:hover{color:var(--ink); border-color:rgba(255,255,255,.25);}
   @media (max-width:640px){
     .set-card{flex-direction:column; max-height:92vh;}
     .set-side{width:auto; flex-direction:row; overflow-x:auto; border-right:none;
@@ -631,6 +708,17 @@
           </div>
           <div class="ip-list" id="ipList"></div>
         </div>
+
+        <div class="set-h sep">Вид карточки</div>
+        <div class="set-note">
+          Что показывать в карточке камеры и в каком порядке. Параметры лежат по три в ряд,
+          строк столько, сколько нужно: седьмой параметр заводит третью строку.
+          Шапка карточки, строка «Группа» и Live Preview не настраиваются — это индикаторы.
+          Настройка относится ко ВСЕМ карточкам марки, а не к отдельной камере: образец ниже —
+          абстрактный, по нему строятся все Sony или все Blackmagic. У марок наборы параметров
+          разные, поэтому и настраиваются они по отдельности.
+        </div>
+        <div id="layEditors"></div>
       </section>
 
       <section class="set-pane" data-pane="keys">
@@ -967,6 +1055,366 @@ function lvStop(e){
 }
 
 /* ---------- построение карточки ---------- */
+/* =========================================================================
+   ПАРАМЕТРЫ КАРТОЧКИ: реестр и раскладка
+
+   🔴 Карточка больше не свёрстана жёстко. Постоянны только шапка (модель,
+   батарея, карта, таймкод, REC), строка «Группа» и Live Preview — это
+   индикаторы, а не настройки. Всё между «Группой» и превью собирается из
+   этого реестра по раскладке, которую оператор задаёт в Настройки → Камеры.
+
+   Зачем: удалённо крутится куда больше, чем влезает в карточку, а карточек на
+   экране должно помещаться много. Кому нужен Mic Gain — кладёт Mic Gain, кому
+   Gain в децибелах вместо ISO (у PYXIS это ОДИН регулятор в двух единицах,
+   §17.4) — кладёт Gain. Спор «что показывать» решает оператор, а не мы.
+
+   Одна запись реестра описывает параметр целиком:
+     id     — как он лежит в сохранённой раскладке (менять нельзя, сломает её);
+     lab    — подпись в карточке;   hint — пояснение в списке доступных;
+     build  — создаёт блок и вешает обработчики, ссылки складывает в e.r[id];
+     update — заполняет его из ответа камеры.
+   Значения и списки — всегда те, что прислала камера (§10.0.1): реестр
+   описывает ВИД параметра, а не его допустимые значения.
+   ========================================================================= */
+
+/* Заготовки: у всех регуляторов один вид — подпись сверху по центру, под ней
+   «− значение +». Метрики живут в CSS один раз на все ряды, иначе ряды
+   разъезжаются по высоте (на этом уже спотыкались). */
+const SEL_ROW = '<div class="step minus">−</div><select class="ctl-sel"></select><div class="step plus">+</div>';
+const VAL_ROW = '<div class="step minus">−</div><span class="bmd-val">—</span><div class="step plus">+</div>';
+const RO_ROW  = '<span class="bmd-val ro">—</span>';
+
+function mkCtl(lab, inner, cls){
+  const el = document.createElement('div');
+  el.className = 'ctl' + (cls ? ' ' + cls : '');
+  el.innerHTML = `<span class="ctl-lab">${lab}</span><div class="ctl-row">${inner}</div>`;
+  return el;
+}
+/* ISO у Sony — единственный блок с приставкой: в АВТО камера сообщает
+   эффективное значение, и оно стоит в одну строку с подписью. */
+function mkCtlIso(){
+  const el = document.createElement('div');
+  el.className = 'ctl iso';
+  el.innerHTML = `<div class="iso-top"><span class="ctl-lab">ISO</span><span class="iso-eff"></span></div>
+                  <div class="ctl-row">${SEL_ROW}</div>`;
+  return el;
+}
+/* Все органы идут через send(): он и команду шлёт, и запоминает выбор, чтобы
+   опрос не вернул старое значение, пока камера подтверждает. */
+function wireSel(e, el, key, action){
+  const r = { el, sel:el.querySelector('.ctl-sel'), lab:el.querySelector('.ctl-lab'),
+              minus:el.querySelector('.step.minus'), plus:el.querySelector('.step.plus') };
+  r.sel.onchange   = ()=>send(e, key, action, r.sel.value);
+  r.minus.onclick  = ()=>stepSelect(e, r.sel, key, action, -1);
+  r.plus.onclick   = ()=>stepSelect(e, r.sel, key, action, +1);
+  return r;
+}
+/* Непрерывный параметр (ББ и tint у Blackmagic): камера отдаёт ДИАПАЗОН, а не
+   список, поэтому шагаем от её текущего значения и держимся границ — своей
+   таблицы значений здесь быть не должно. */
+function wireBump(e, el, key, action, step, rngKey, def, fmt){
+  const r = { el, val:el.querySelector('.bmd-val'),
+              minus:el.querySelector('.step.minus'), plus:el.querySelector('.step.plus') };
+  const bump = dir => {
+    const d = e.last; if(!d) return;
+    const rng = Array.isArray(d[rngKey]) ? d[rngKey] : def;
+    const cur = Number(desired(e, key, d[key]));
+    if(!isFinite(cur)) return;
+    const nv = Math.max(rng[0], Math.min(rng[1], cur + dir*step));
+    if(nv === cur) return;
+    r.val.textContent = fmt(nv);         // показываем сразу, не ожидая опроса
+    send(e, key, action, nv);
+  };
+  r.minus.onclick = ()=>bump(-1);
+  r.plus.onclick  = ()=>bump(+1);
+  return r;
+}
+
+/* Подписи режимов автоэкспозиции Blackmagic. Имя режима приходит от камеры;
+   незнакомое показываем как есть, а не прячем. */
+const BMD_AE_LABEL = {
+  'Off':'выкл', 'Iris':'диафрагма', 'Shutter':'выдержка',
+  'IrisAndShutter':'диафр.+выдержка', 'ShutterAndIris':'выдержка+диафр.',
+  'WhiteBalance':'ББ', 'Manual':'ручной'
+};
+
+const PARAM_DEFS = {
+  sony: [
+    { id:'iso', lab:'ISO', hint:'чувствительность',
+      build(e){
+        const el = mkCtlIso();
+        const r = wireSel(e, el, 'iso', 'iso');
+        r.sel.classList.add('iso-sel');
+        r.sel.innerHTML = ISO_OPTS;                 // запасной список: если камера своего не прислала
+        r.eff = el.querySelector('.iso-eff');
+        e.r.iso = r; return el;
+      },
+      update(e, d){
+        const r = e.r.iso;
+        // Список берём у камеры: он зависит от модели и режима съёмки, и зашитая
+        // таблица с ним расходилась (у ZV-E1 шаг в треть ступени).
+        if(d.iso !== undefined) e.iso = d.iso;
+        const opts = (d.isoOpts && Array.isArray(d.isoOpts.opts) ? d.isoOpts.opts : [])
+                       .map(o => [o[0], o[1] === 'AUTO' ? 'АВТО' : o[1]]);
+        if(opts.length){
+          fillSelect(r.sel, opts, desired(e, 'iso', d.isoOpts.cur), null, d.isoOpts.rw);
+        }else if(d.iso !== undefined){
+          const v = String(desired(e, 'iso', d.iso));
+          if(r.sel.value !== v) r.sel.value = v;
+          r.sel.disabled = (d.isoOpts && d.isoOpts.rw === false);
+        }
+        r.eff.textContent = d.iso === "AUTO" ? `эфф. ${d.isoEff ?? ''}` : '';
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+
+    { id:'shutter', lab:'Shutter', hint:'выдержка',
+      build(e){ const el = mkCtl('Shutter', SEL_ROW); e.r.shutter = wireSel(e, el, 'shutter', 'shutter'); return el; },
+      update(e, d){
+        const r = e.r.shutter;
+        fillSelect(r.sel, d.shutter && d.shutter.opts,
+                   desired(e, 'shutter', d.shutter && d.shutter.cur), fmtShutter,
+                   d.shutter && d.shutter.rw);
+        // Кинокамеры Sony умеют считать выдержку углом затвора; метки приходят
+        // готовыми ("180°"), но подпись должна сказать, что это не скорость.
+        r.lab.textContent = (d.shutterMeasurement === 'ShutterAngle') ? 'Shutter °' : 'Shutter';
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+
+    { id:'aperture', lab:'Aperture', hint:'диафрагма',
+      build(e){ const el = mkCtl('Aperture', SEL_ROW); e.r.aperture = wireSel(e, el, 'aperture', 'aperture'); return el; },
+      update(e, d){
+        const r = e.r.aperture;
+        fillSelect(r.sel, d.aperture && d.aperture.opts,
+                   desired(e, 'aperture', d.aperture && d.aperture.cur), fmtAperture,
+                   d.aperture && d.aperture.rw);
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+
+    { id:'wbk', lab:'WB', hint:'цветовая температура, K',
+      build(e){ const el = mkCtl('WB', SEL_ROW); const r = wireSel(e, el, 'wbkelvin', 'wbkelvin');
+                r.sel.innerHTML = KELVIN_OPTS; e.r.wbk = r; return el; },
+      update(e, d){
+        const r = e.r.wbk;
+        // Камера объявляет диапазон [min, max, шаг] — строим список по нему.
+        // Раньше здесь были свои пресеты и округление, из-за чего панель
+        // показывала не то, что стоит на камере (у ZV-E1 шаг 100 K).
+        const kr = Array.isArray(d.wbKelvinRange) ? d.wbKelvinRange : null;
+        if(kr && kr[1] > kr[0]){
+          const [lo, hi, st] = [kr[0], kr[1], kr[2] > 0 ? kr[2] : 100];
+          const sig = `${lo}-${hi}-${st}`;
+          if(r.sig !== sig){                      // список длинный — пересобираем только при смене диапазона
+            r.opts = [];
+            for(let k = lo; k <= hi; k += st) r.opts.push([k, k + 'K']);
+            r.sig = sig;
+          }
+          fillSelect(r.sel, r.opts, desired(e, 'wbkelvin', d.wbKelvin), null, d.wbKelvinRw);
+        }else if(d.wbKelvin != null){             // камера диапазон не отдала — старый путь
+          const k = String(desired(e, 'wbkelvin', nearestK(d.wbKelvin)));
+          if(r.sel.value !== k) r.sel.value = k;
+          r.sel.disabled = (d.wbKelvinRw === false);
+        }
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+
+    { id:'micgain', lab:'Mic Gain', hint:'уровень микрофона',
+      build(e){ const el = mkCtl('Mic Gain', SEL_ROW); e.r.micgain = wireSel(e, el, 'micgain', 'micgain'); return el; },
+      update(e, d){
+        const r = e.r.micgain;
+        // Показываем, только если камера уровень отдаёт: у профи-камер вместо
+        // общего уровня отдельные каналы, и пустой регулятор врал бы.
+        const mg = d.micGain && Array.isArray(d.micGain.opts) ? d.micGain.opts : [];
+        r.el.classList.toggle('na', !mg.length);
+        if(!mg.length) return;
+        fillSelect(r.sel, mg, desired(e, 'micgain', d.micGain.cur), null, d.micGain.rw);
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+
+    /* Пресет ББ («Дневной свет», «Облачно», …). Сервер отдавал его в status.json
+       и принимал команду `wb` с самого начала, но в карточке места не было. */
+    { id:'wbpreset', lab:'ББ', hint:'пресет баланса белого',
+      build(e){ const el = mkCtl('ББ', SEL_ROW); e.r.wbpreset = wireSel(e, el, 'wb', 'wb'); return el; },
+      update(e, d){
+        const r = e.r.wbpreset;
+        const p = d.wb || {};
+        const opts = Array.isArray(p.opts) ? p.opts : [];
+        r.el.classList.toggle('na', !opts.length && p.cur == null);
+        fillSelect(r.sel, opts, desired(e, 'wb', p.cur), null, p.rw);
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+  ],
+
+  bmd: [
+    { id:'iso', lab:'ISO', hint:'чувствительность; то же, что Gain, в других единицах',
+      build(e){ const el = mkCtl('ISO', SEL_ROW); e.r.iso = wireSel(e, el, 'iso', 'iso'); return el; },
+      update(e, d){
+        const r = e.r.iso;
+        fillSelect(r.sel, (d.isoOpts||[]).map(v=>[v, String(v)]), desired(e, 'iso', d.iso), null, true);
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+
+    { id:'shutter', lab:'Shutter', hint:'выдержка (или угол затвора)',
+      build(e){ const el = mkCtl('Shutter', SEL_ROW); e.r.shutter = wireSel(e, el, 'shutter', 'shutter'); return el; },
+      update(e, d){
+        const r = e.r.shutter;
+        const meas = d.shutterMeasurement || 'ShutterSpeed';
+        fillSelect(r.sel, (d.shutterOpts||[]).map(v=>[v, bmdShutterLabel(v, meas)]),
+                   desired(e, 'shutter', d.shutter), null, true);
+        // Подпись говорит, в чём камера считает выдержку — иначе «180» рядом с
+        // «1/50» у соседней камеры выглядит ошибкой.
+        r.lab.textContent = (meas === 'ShutterAngle') ? 'Shutter °' : 'Shutter';
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+
+    /* 🔴 У PYXIS Gain и ISO — ОДИН регулятор сенсора в двух единицах
+       (gain dB = 20·log10(ISO/400), §17.4). Держать в карточке оба незачем:
+       оператор выбирает привычные ему единицы и кладёт один из них. */
+    { id:'gain', lab:'Gain', hint:'усиление в dB; то же, что ISO, в других единицах',
+      build(e){ const el = mkCtl('Gain', SEL_ROW); e.r.gain = wireSel(e, el, 'gain', 'gain'); return el; },
+      update(e, d){
+        const r = e.r.gain;
+        fillSelect(r.sel, (d.gainOpts||[]).map(v=>[v, (v>0?'+':'')+v+' dB']), desired(e, 'gain', d.gain), null, true);
+        toggleSteps(r.minus, r.plus, r.sel);
+      } },
+
+    { id:'wb', lab:'WB', hint:'цветовая температура, K',
+      build(e){ const el = mkCtl('WB', VAL_ROW);
+                e.r.wb = wireBump(e, el, 'wb', 'wbkelvin', BMD_WB_STEP, 'wbRange', [2500,10000], v=>v+'K');
+                return el; },
+      update(e, d){
+        const v = desired(e, 'wb', d.wb);
+        e.r.wb.val.textContent = (v == null || v === 'null') ? '—' : v + 'K';
+      } },
+
+    { id:'tint', lab:'Tint', hint:'оттенок ББ, ±',
+      build(e){ const el = mkCtl('Tint', VAL_ROW);
+                e.r.tint = wireBump(e, el, 'tint', 'tint', BMD_TINT_STEP, 'tintRange', [-50,50], v=>String(v));
+                return el; },
+      update(e, d){
+        const v = desired(e, 'tint', d.tint);
+        e.r.tint.val.textContent = (v == null || v === 'null') ? '—' : String(v);
+      } },
+
+    /* Диафрагма пока только показывается: камера отдаёт границы (f4–f22) и
+       признак «управляемо», но НЕ список шагов — чем шагать, ещё не решено
+       (§17.7), а выдумывать свою таблицу нельзя. */
+    { id:'iris', lab:'Iris', hint:'диафрагма — только показ',
+      build(e){ const el = mkCtl('Iris', RO_ROW); e.r.iris = { el, val:el.querySelector('.bmd-val') }; return el; },
+      update(e, d){
+        const r = e.r.iris;
+        r.val.textContent = (d.iris == null) ? '—' : 'F' + d.iris;
+        // Ровно тот же смысл, что у флага rw у Sony: объектив без мотора
+        // (24–105 у нашей PYXIS) камера объявляет неуправляемым.
+        r.val.classList.toggle('dim', d.irisControllable === false);
+        r.el.title = d.irisControllable === false
+          ? 'Объектив не даёт управлять диафрагмой по сети' : 'Диафрагма объектива';
+      } },
+
+    /* Автоэкспозиция: пока камера ведёт значение сама, она отвечает 403 на
+       попытку его записать (§17.3) — оператору полезно видеть, почему. */
+    { id:'ae', lab:'Auto Exp', hint:'режим автоэкспозиции — только показ',
+      build(e){ const el = mkCtl('Auto Exp', RO_ROW); e.r.ae = { el, val:el.querySelector('.bmd-val') }; return el; },
+      update(e, d){
+        const m = String(d.autoExposure || '');
+        const r = e.r.ae;
+        r.val.textContent = m ? (BMD_AE_LABEL[m] || m) : '—';
+        r.val.classList.toggle('dim', !m || m === 'Off');
+      } },
+  ],
+};
+
+function paramList(vendor){ return PARAM_DEFS[vendor === 'bmd' ? 'bmd' : 'sony']; }
+function paramDef(vendor, id){ return paramList(vendor).find(p => p.id === id) || null; }
+
+/* ---------- раскладка: что стоит в карточке и в каком порядке ----------
+   По умолчанию — ровно то, что было в карточке до конструктора, поэтому у тех,
+   кто ничего не настраивал, вид не меняется.
+
+   🔴 Хранится НА СЕРВЕРЕ, в cardlayout.json — одна на марку и одна на студию:
+   настроили на ноутбуке, то же самое видит док OBS и телефон оператора. Этим
+   она отличается от свёрнутых групп, которые нарочно живут в браузере: там у
+   каждого свой зал, здесь — общий вид карточек. Схемой владеет панель, сервер
+   её только хранит — тот же уклад, что и с groups.json.
+
+   Пока ответ сервера не пришёл (или сервера нет — панель открыта файлом,
+   связь оборвалась), работаем с набором по умолчанию: карточки должны
+   появиться сразу, а не ждать настройку. */
+const LAYOUT_DEFAULT = {
+  sony: ['iso','shutter','aperture','micgain','wbk'],
+  bmd:  ['iso','shutter','gain','wb','tint'],
+};
+const cardLayout = { sony:[...LAYOUT_DEFAULT.sony], bmd:[...LAYOUT_DEFAULT.bmd] };
+function layoutFor(vendor){ return cardLayout[vendor === 'bmd' ? 'bmd' : 'sony']; }
+
+async function loadCardLayout(){
+  let raw = null;
+  try{
+    const r = await fetch(`${LV_BASE}/cardlayout.json`, {cache:'no-store'});
+    if(!r.ok) return;
+    raw = await r.json();
+  }catch(_){ return; }                 // сервера нет — остаёмся на наборе по умолчанию
+  if(!raw || typeof raw !== 'object') return;
+  let changed = false;
+  ['sony','bmd'].forEach(v=>{
+    if(!Array.isArray(raw[v])) return;
+    // Незнакомый id молча выбрасываем: файл мог быть написан версией, где
+    // параметр назывался иначе или его ещё не было.
+    const ids = raw[v].filter((id, i, a) => paramDef(v, id) && a.indexOf(id) === i);
+    if(ids.join(',') === cardLayout[v].join(',')) return;
+    cardLayout[v] = ids;
+    changed = true;
+  });
+  if(!changed) return;
+  // Карточки могли построиться раньше ответа — пересобрать их и конструктор.
+  ['sony','bmd'].forEach(rebuildVendorCards);
+  renderLayoutEditors();
+}
+
+/* Сохранение с задержкой, как у групп: перетаскивание — это несколько правок
+   подряд, и слать файл на каждую незачем. Молчать об ошибке нельзя: человек
+   решит, что настроил, а после перезапуска увидит прежнее. */
+let layoutSaveT = null;
+function saveLayout(){
+  clearTimeout(layoutSaveT);
+  layoutSaveT = setTimeout(()=>{
+    fetch(`${LV_BASE}/cardlayout/save`, {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(cardLayout)})
+      .then(r => { if(!r.ok) throw 0; })
+      .catch(()=> showToast('Не удалось сохранить вид карточки'));
+  }, 300);
+}
+
+/* Собрать зону параметров. Вызывается и для живой карточки, и для образца в
+   настройках — поэтому образец показывает ровно то, что получится. */
+function buildParams(e, vendor, host){
+  host.innerHTML = '';
+  e.r = {};
+  e.parts = [];
+  layoutFor(vendor).forEach(id=>{
+    const P = paramDef(vendor, id); if(!P) return;
+    const el = P.build(e);
+    el.dataset.pid = id;
+    host.appendChild(el);
+    e.parts.push(P);
+  });
+}
+function updateParams(e, d){ (e.parts || []).forEach(P => P.update(e, d)); }
+
+/* Пересобрать зону параметров у живых карточек этой марки. Только её: шапка,
+   группа и Live Preview остаются на месте вместе с открытым превью и его
+   потоком кадров. */
+function rebuildVendorCards(vendor){
+  Object.values(cards).forEach(e=>{
+    if((e.vendor || 'sony') !== vendor) return;
+    buildParams(e, vendor, e.paramsEl);
+    if(e.last) updateCard(e, e.last);
+  });
+}
+// Раскладку сменил человек — сохранить на сервере и показать результат сразу.
+function applyLayout(vendor){
+  saveLayout();
+  rebuildVendorCards(vendor);
+}
+
 function buildCard(cam){
   // Карточки марок РАЗНЫЕ: у камер разный набор свойств, и общий знаменатель
   // означал бы натянуть чужую модель на одну из них (решение владельца).
@@ -976,15 +1424,21 @@ function updateCard(e, d){
   return (d.vendor === 'bmd') ? updateBmdCard(e, d) : updateSonyCard(e, d);
 }
 
-function buildSonyCard(cam){
-  const camNum = parseInt(String(cam.id).replace(/\D/g,''),10);
+/* ---------- карточка Sony ----------
+   Каркас постоянный: шапка (модель · батарея · питание · остаток карты · REC),
+   ниже строка «Группа», ещё ниже Live Preview. Настраивается только зона между
+   «Группой» и превью — её собирает buildParams() по раскладке оператора.
+   Каркас вынесен в отдельную функцию, потому что им же рисуется образец в
+   настройках: две вёрстки одного и того же неизбежно разошлись бы, и настройка
+   показывала бы не то, что получится (тот же довод, что с окном настроек). */
+function sonyCardEl(model){
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML = `
     <div class="crow">
       <div class="cinfo">
         <div class="ctop">
-          <div class="cam">${modelName(cam.model)}</div>
+          <div class="cam">${modelName(model)}</div>
           <div class="batrow">
             <div class="battery"><div class="bfill-track"><div class="fill"></div></div></div>
             <div class="bolt" title="Питание от сети">${BOLT_SVG}</div>
@@ -995,32 +1449,8 @@ function buildSonyCard(cam){
         </div>
       </div>
     </div>
-    <!-- экспозиция одной строкой: ISO · Shutter · Aperture -->
-    <div class="controls">
-      <div class="ctl iso">
-        <div class="iso-top"><span class="ctl-lab">ISO</span><span class="iso-eff"></span></div>
-        <div class="ctl-row">
-          <div class="step minus">−</div>
-          <select class="iso-sel">${ISO_OPTS}</select>
-          <div class="step plus">+</div>
-        </div>
-      </div>
-      <div class="ctl"><span class="ctl-lab">Shutter</span>
-        <div class="ctl-row"><div class="step sh-minus">−</div><select class="ctl-sel sh-sel"></select><div class="step sh-plus">+</div></div>
-      </div>
-      <div class="ctl"><span class="ctl-lab">Aperture</span>
-        <div class="ctl-row"><div class="step ap-minus">−</div><select class="ctl-sel ap-sel"></select><div class="step ap-plus">+</div></div>
-      </div>
-    </div>
-    <!-- звук и баланс белого — вторая строка -->
-    <div class="controls2">
-      <div class="ctl mic"><span class="ctl-lab">Mic Gain</span>
-        <div class="ctl-row"><div class="step mic-minus">−</div><select class="ctl-sel mic-sel"></select><div class="step mic-plus">+</div></div>
-      </div>
-      <div class="ctl"><span class="ctl-lab">WB</span>
-        <div class="ctl-row"><div class="step wb-minus">−</div><select class="ctl-sel wb-sel">${KELVIN_OPTS}</select><div class="step wb-plus">+</div></div>
-      </div>
-    </div>
+    <!-- сетка параметров: состав и порядок задаёт оператор в настройках -->
+    <div class="card-params"></div>
     <div class="lv">
       <div class="lv-head">
         <span class="lv-title">Live Preview</span>
@@ -1057,68 +1487,47 @@ function buildSonyCard(cam){
       <div class="oh-title">Высокая температура</div>
       <div class="oh-hint">Нажмите, чтобы скрыть</div>
     </div>`;
+  return card;
+}
+/* Ссылки на постоянную часть карточки. Органы управления сюда не входят: их
+   складывает buildParams() в e.r — иначе ссылка пережила бы свой элемент,
+   когда оператор уберёт параметр из карточки. */
+function sonyRefs(card, e){
+  e.card      = card;
+  e.fill      = card.querySelector('.battery .fill');
+  e.cardVal   = card.querySelector('.card-val');
+  e.recBtn    = card.querySelector('.rec-btn');
+  e.ohTitle   = card.querySelector('.oh-title');
+  e.paramsEl  = card.querySelector('.card-params');
+  e.lvFrame   = card.querySelector('.lv-frame');
+  e.lvMedia   = card.querySelector('.lv-media');
+  e.lvImg     = card.querySelector('.lv-img');
+  e.lvOv      = card.querySelector('.lv-ov');
+  e.lvCbEye   = card.querySelector('.lv-cb-eye');
+  e.lvCbZone  = card.querySelector('.lv-cb-zone');
+  e.lvRotBtn  = card.querySelector('.lv-rot');
+  e.lvSection = card.querySelector('.lv');
+  e.lvToggles = card.querySelector('.lv-toggles');
+  e.lvFsBtn   = card.querySelector('.lv-fs');
+  e.lvBar     = card.querySelector('.lv-bar');
+  e.lvExitBtn = card.querySelector('.lv-fs-exit');
+}
+
+function buildSonyCard(cam){
+  const camNum = parseInt(String(cam.id).replace(/\D/g,''),10);
+  const card = sonyCardEl(cam.model);
   app.insertBefore(card, empty);       // карточки идут перед плейсхолдером
   const e = {
-    id: cam.id, camNum, card,
+    id: cam.id, camNum, vendor:'sony',
     rec: false, iso: 'AUTO',
-    fill:     card.querySelector('.battery .fill'),
-    cardVal:  card.querySelector('.card-val'),
-    recBtn:   card.querySelector('.rec-btn'),
-    isoSel:   card.querySelector('.iso-sel'),
-    micBox:   card.querySelector('.mic'),
-    micSel:   card.querySelector('.mic-sel'),
-    isoEffEl: card.querySelector('.iso-eff'),
-    minus:    card.querySelector('.step.minus'),
-    plus:     card.querySelector('.step.plus'),
-    micMinus: card.querySelector('.step.mic-minus'),
-    micPlus:  card.querySelector('.step.mic-plus'),
-    apSel:    card.querySelector('.ap-sel'),
-    shSel:    card.querySelector('.sh-sel'),
-    wbSel:    card.querySelector('.wb-sel'),
-    apMinus:  card.querySelector('.step.ap-minus'),
-    apPlus:   card.querySelector('.step.ap-plus'),
-    shMinus:  card.querySelector('.step.sh-minus'),
-    shPlus:   card.querySelector('.step.sh-plus'),
-    wbMinus:  card.querySelector('.step.wb-minus'),
-    wbPlus:   card.querySelector('.step.wb-plus'),
     ohState:  0,           // последнее состояние нагрева, чтобы ловить именно ПЕРЕХОД
     ohHidden: false,       // оповещение свёрнуто человеком
-    ohTitle:  card.querySelector('.oh-title'),
     pend:     {},          // что человек выбрал и что камера ещё не подтвердила
-    wbOpts:   null, wbSig: null,
-    lvFrame:  card.querySelector('.lv-frame'),
-    lvMedia:  card.querySelector('.lv-media'),
-    lvImg:    card.querySelector('.lv-img'),
-    lvOv:     card.querySelector('.lv-ov'),
-    lvCbEye:  card.querySelector('.lv-cb-eye'),
-    lvCbZone: card.querySelector('.lv-cb-zone'),
-    lvRotBtn: card.querySelector('.lv-rot'),
-    lvSection: card.querySelector('.lv'),
-    lvToggles: card.querySelector('.lv-toggles'),
-    lvFsBtn:  card.querySelector('.lv-fs'),
-    lvBar:    card.querySelector('.lv-bar'),
-    lvExitBtn:card.querySelector('.lv-fs-exit'),
     lvRot:    0,
   };
-  // обработчики
+  sonyRefs(card, e);
+  // обработчики постоянной части
   e.recBtn.onclick  = ()=>{ e.recBtn.classList.add('pending'); cmd({cam:e.camNum,action:"rec",value:e.rec?"stop":"start"}); };
-  // Все органы управления идут через send(): он и команду шлёт, и запоминает
-  // выбор, чтобы опрос не вернул старое значение, пока камера подтверждает.
-  e.isoSel.onchange = ()=>send(e, 'iso',      'iso',      e.isoSel.value);
-  e.minus.onclick   = ()=>stepSelect(e, e.isoSel, 'iso',      'iso',      -1);
-  e.plus.onclick    = ()=>stepSelect(e, e.isoSel, 'iso',      'iso',      +1);
-  e.apSel.onchange  = ()=>send(e, 'aperture', 'aperture', e.apSel.value);
-  e.apMinus.onclick = ()=>stepSelect(e, e.apSel,  'aperture', 'aperture', -1);
-  e.apPlus.onclick  = ()=>stepSelect(e, e.apSel,  'aperture', 'aperture', +1);
-  e.shSel.onchange  = ()=>send(e, 'shutter',  'shutter',  e.shSel.value);
-  e.shMinus.onclick = ()=>stepSelect(e, e.shSel,  'shutter',  'shutter',  -1);
-  e.shPlus.onclick  = ()=>stepSelect(e, e.shSel,  'shutter',  'shutter',  +1);
-  e.wbSel.onchange  = ()=>send(e, 'wbkelvin', 'wbkelvin', e.wbSel.value);
-  e.wbMinus.onclick = ()=>stepSelect(e, e.wbSel,  'wbkelvin', 'wbkelvin', -1);
-  e.wbPlus.onclick  = ()=>stepSelect(e, e.wbSel,  'wbkelvin', 'wbkelvin', +1);
-  e.micSel.onchange = ()=>send(e, 'micgain',  'micgain',  e.micSel.value);
-  e.micMinus.onclick= ()=>stepSelect(e, e.micSel, 'micgain',  'micgain',  -1);
-  e.micPlus.onclick = ()=>stepSelect(e, e.micSel, 'micgain',  'micgain',  +1);
   card.querySelector('.lv-head').onclick = ()=>{
     const lv = card.querySelector('.lv');
     if(lv.classList.toggle('open')) lvStart(e); else lvStop(e);
@@ -1150,11 +1559,12 @@ function buildSonyCard(cam){
   const grpRow = document.createElement('div');
   grpRow.className = 'card-grp';
   grpRow.innerHTML = '<span class="l">Группа</span><select></select>';
-  card.querySelector('.controls').before(grpRow);
+  e.paramsEl.before(grpRow);
   e.grpRow = grpRow;
   e.grpSel = grpRow.querySelector('select');
   e.grpSel.onchange = ()=>moveCam(e.key, e.grpSel.value);
 
+  buildParams(e, 'sony', e.paramsEl);
   cards[cam.id] = e;
   return e;
 }
@@ -1275,66 +1685,8 @@ function updateSonyCard(e, d){
   e.cardVal.querySelector('.u').textContent = mu;
   e.cardVal.className = 'val card-val' + (mk ? ' num-'+mk : '');
 
-  // ISO. Список берём у камеры: он зависит от модели и режима съёмки, и зашитая
-  // таблица с ним расходилась (у ZV-E1 камера даёт шаг в треть ступени —
-  // 80·100·125·160·200…, а в таблице был совсем другой набор).
-  // CONFIG.isoValues остаётся запасным путём, если камера списка не прислала.
-  if(d.iso!==undefined) e.iso = d.iso;
-  const isoOpts = (d.isoOpts && Array.isArray(d.isoOpts.opts) ? d.isoOpts.opts : [])
-                    .map(o => [o[0], o[1] === 'AUTO' ? 'АВТО' : o[1]]);
-  if(isoOpts.length){
-    fillSelect(e.isoSel, isoOpts, desired(e, 'iso', d.isoOpts.cur), null, d.isoOpts.rw);
-  }else if(d.iso!==undefined){
-    const s = String(desired(e, 'iso', d.iso));
-    if(e.isoSel.value !== s) e.isoSel.value = s;
-    e.isoSel.disabled = (d.isoOpts && d.isoOpts.rw === false);
-  }
-  e.isoEffEl.textContent = d.iso==="AUTO" ? `эфф. ${d.isoEff ?? ''}` : '';
-  toggleSteps(e.minus, e.plus, e.isoSel);
-
-  // диафрагма / выдержка
-  fillSelect(e.apSel, d.aperture && d.aperture.opts,
-             desired(e, 'aperture', d.aperture && d.aperture.cur), fmtAperture,
-             d.aperture && d.aperture.rw);
-  fillSelect(e.shSel, d.shutter && d.shutter.opts,
-             desired(e, 'shutter', d.shutter && d.shutter.cur), fmtShutter,
-             d.shutter && d.shutter.rw);
-  // Кинокамеры Sony умеют считать выдержку углом затвора; метки приходят уже
-  // готовыми ("180°"), но подпись контрола должна сказать, что это не скорость.
-  {
-    const lab = e.card.querySelectorAll('.controls .ctl')[1].querySelector('.ctl-lab');
-    if(lab) lab.textContent = (d.shutterMeasurement === 'ShutterAngle') ? 'Shutter °' : 'Shutter';
-  }
-  toggleSteps(e.apMinus, e.apPlus, e.apSel);
-  toggleSteps(e.shMinus, e.shPlus, e.shSel);
-
-  // уровень микрофона: показываем, только если камера его отдаёт
-  const mg = d.micGain && Array.isArray(d.micGain.opts) ? d.micGain.opts : [];
-  e.micBox.style.display = mg.length ? '' : 'none';
-  if(mg.length){
-    fillSelect(e.micSel, mg, desired(e, 'micgain', d.micGain.cur), null, d.micGain.rw);
-    toggleSteps(e.micMinus, e.micPlus, e.micSel);
-  }
-
-  // ББ в кельвинах. Камера объявляет диапазон [min, max, шаг] — строим список по
-  // нему. Раньше здесь были свои пресеты и округление к ближайшему, из-за чего
-  // панель показывала не то, что стоит на камере (у ZV-E1 шаг 100 K).
-  const kr = Array.isArray(d.wbKelvinRange) ? d.wbKelvinRange : null;
-  if(kr && kr[1] > kr[0]){
-    const [lo, hi, st] = [kr[0], kr[1], kr[2] > 0 ? kr[2] : 100];
-    const sig = `${lo}-${hi}-${st}`;
-    if(e.wbSig !== sig){                       // список длинный — пересобираем только при смене диапазона
-      e.wbOpts = [];
-      for(let k = lo; k <= hi; k += st) e.wbOpts.push([k, k + 'K']);
-      e.wbSig = sig;
-    }
-    fillSelect(e.wbSel, e.wbOpts, desired(e, 'wbkelvin', d.wbKelvin), null, d.wbKelvinRw);
-  }else if(d.wbKelvin!=null){                  // камера диапазон не отдала — старый путь
-    const k = String(desired(e, 'wbkelvin', nearestK(d.wbKelvin)));
-    if(e.wbSel.value !== k) e.wbSel.value = k;
-    e.wbSel.disabled = (d.wbKelvinRw === false);
-  }
-  toggleSteps(e.wbMinus, e.wbPlus, e.wbSel);
+  // Регуляторы — те, что оператор положил в карточку, и в его порядке.
+  updateParams(e, d);
 }
 
 /* =========================================================================
@@ -1377,13 +1729,16 @@ function tcShort(v){
   return p.length >= 3 ? p.slice(0, 3).join(':') : String(v);
 }
 
-function buildBmdCard(cam){
-  const camNum = parseInt(String(cam.id).replace(/\D/g,''),10);
+/* Каркас карточки Blackmagic. Постоянная часть: шапка (модель · tally ·
+   таймкод · REC) и строка формата (кодек, разрешение, частота, динамический
+   диапазон, питание). Настраивается, как и у Sony, только зона под «Группой».
+   Живого превью здесь нет: картинку камера отдаёт отдельным потоком (§15.7). */
+function bmdCardEl(model){
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML = `
     <div class="crow"><div class="cinfo"><div class="ctop">
-      <div class="cam">${modelName(cam.model)}</div>
+      <div class="cam">${modelName(model)}</div>
       <div class="bmd-tally">tally</div>
       <div class="bmd-lost">Offline</div>
       <div class="bmd-tc">--:--:--:--</div>
@@ -1392,61 +1747,33 @@ function buildBmdCard(cam){
     <div class="bmd-fmt">
       <span class="bmd-name"></span><b class="f-codec">—</b><span class="f-res"></span><span class="f-fps"></span><span class="f-dr"></span><span class="bmd-pw"></span>
     </div>
-    <div class="controls">
-      <div class="ctl"><span class="ctl-lab">ISO</span>
-        <div class="ctl-row"><div class="step iso-minus">−</div><select class="ctl-sel iso-sel"></select><div class="step iso-plus">+</div></div>
-      </div>
-      <div class="ctl"><span class="ctl-lab">Shutter</span>
-        <div class="ctl-row"><div class="step sh-minus">−</div><select class="ctl-sel sh-sel"></select><div class="step sh-plus">+</div></div>
-      </div>
-      <div class="ctl"><span class="ctl-lab">Gain</span>
-        <div class="ctl-row"><div class="step g-minus">−</div><select class="ctl-sel g-sel"></select><div class="step g-plus">+</div></div>
-      </div>
-    </div>
-    <div class="controls2">
-      <div class="ctl"><span class="ctl-lab">WB</span>
-        <div class="ctl-row"><div class="step wb-minus">−</div><span class="bmd-val wb-val">—</span><div class="step wb-plus">+</div></div>
-      </div>
-      <div class="ctl"><span class="ctl-lab">Tint</span>
-        <div class="ctl-row"><div class="step t-minus">−</div><span class="bmd-val t-val">—</span><div class="step t-plus">+</div></div>
-      </div>
-    </div>
+    <div class="card-params"></div>
     <div class="bmd-off">Камера найдена, но <b>REST-управление не включено</b>.<br>
       Blackmagic Camera Setup → вкладка сети → включить Web Media Manager.</div>`;
-  const q = s => card.querySelector(s);
-  const e = {
-    card, camNum, vendor:'bmd', pend:{}, last:null,
-    name:q('.bmd-name'), tc:q('.bmd-tc'), pw:q('.bmd-pw'), tally:q('.bmd-tally'),
-    lost:q('.bmd-lost'), offMsg:q('.bmd-off'),
-    fCodec:q('.f-codec'), fRes:q('.f-res'), fFps:q('.f-fps'), fDr:q('.f-dr'),
-    isoSel:q('.iso-sel'), shSel:q('.sh-sel'), gSel:q('.g-sel'),
-    wbVal:q('.wb-val'), tVal:q('.t-val'),
-  };
-  e.isoSel.onchange = ()=>send(e,'iso','iso',e.isoSel.value);
-  q('.iso-minus').onclick = ()=>stepSelect(e,e.isoSel,'iso','iso',-1);
-  q('.iso-plus') .onclick = ()=>stepSelect(e,e.isoSel,'iso','iso',+1);
-  e.shSel.onchange  = ()=>send(e,'shutter','shutter',e.shSel.value);
-  q('.sh-minus').onclick  = ()=>stepSelect(e,e.shSel,'shutter','shutter',-1);
-  q('.sh-plus') .onclick  = ()=>stepSelect(e,e.shSel,'shutter','shutter',+1);
-  e.gSel.onchange   = ()=>send(e,'gain','gain',e.gSel.value);
-  q('.g-minus').onclick   = ()=>stepSelect(e,e.gSel,'gain','gain',-1);
-  q('.g-plus') .onclick   = ()=>stepSelect(e,e.gSel,'gain','gain',+1);
-  // ББ и tint — непрерывные: шагаем от текущего значения камеры, держась
-  // диапазона, который она сама объявила.
-  const bump = (field, action, step, dir) => {
-    const d = e.last; if(!d) return;
-    const rng = field==='wb' ? (d.wbRange||[2500,10000]) : (d.tintRange||[-50,50]);
-    const cur = Number(desired(e, field, d[field]));
-    if(!isFinite(cur)) return;
-    const nv = Math.max(rng[0], Math.min(rng[1], cur + dir*step));
-    if(nv === cur) return;
-    if(field==='wb'){ e.wbVal.textContent = nv + 'K'; } else { e.tVal.textContent = nv; }
-    send(e, field, action, nv);
-  };
-  q('.wb-minus').onclick = ()=>bump('wb','wbkelvin',BMD_WB_STEP,-1);
-  q('.wb-plus') .onclick = ()=>bump('wb','wbkelvin',BMD_WB_STEP,+1);
-  q('.t-minus') .onclick = ()=>bump('tint','tint',BMD_TINT_STEP,-1);
-  q('.t-plus')  .onclick = ()=>bump('tint','tint',BMD_TINT_STEP,+1);
+  return card;
+}
+function bmdRefs(card, e){
+  const q = sel => card.querySelector(sel);
+  e.card     = card;
+  e.name     = q('.bmd-name');
+  e.tc       = q('.bmd-tc');
+  e.pw       = q('.bmd-pw');
+  e.tally    = q('.bmd-tally');
+  e.lost     = q('.bmd-lost');
+  e.offMsg   = q('.bmd-off');
+  e.fCodec   = q('.f-codec');
+  e.fRes     = q('.f-res');
+  e.fFps     = q('.f-fps');
+  e.fDr      = q('.f-dr');
+  e.recBtn   = q('.rec-btn');
+  e.paramsEl = q('.card-params');
+}
+
+function buildBmdCard(cam){
+  const camNum = parseInt(String(cam.id).replace(/\D/g,''),10);
+  const card = bmdCardEl(cam.model);
+  const e = { id: cam.id, camNum, vendor:'bmd', pend:{}, last:null };
+  bmdRefs(card, e);
 
   // группы и перетаскивание — общие с сониевской карточкой
   e.key = cam.key || '';
@@ -1462,11 +1789,12 @@ function buildBmdCard(cam){
   const grpRow = document.createElement('div');
   grpRow.className = 'card-grp';
   grpRow.innerHTML = '<span class="l">Группа</span><select></select>';
-  card.querySelector('.controls').before(grpRow);
+  e.paramsEl.before(grpRow);
   e.grpRow = grpRow;
   e.grpSel = grpRow.querySelector('select');
   e.grpSel.onchange = ()=>moveCam(e.key, e.grpSel.value);
 
+  buildParams(e, 'bmd', e.paramsEl);
   cards[cam.id] = e;
   return e;
 }
@@ -1511,24 +1839,11 @@ function updateBmdCard(e, d){
   e.fFps.textContent   = d.fps ? `· ${d.fps}p` : '';
   e.fDr.textContent    = d.dynamicRange ? `· ${d.dynamicRange}` : '';
 
-  e.card.querySelector('.rec-btn').classList.toggle('rec', d.rec === true);
+  e.recBtn.classList.toggle('rec', d.rec === true);
 
-  // Списки — ровно те, что прислала камера.
-  fillSelect(e.isoSel, (d.isoOpts||[]).map(v=>[v,String(v)]), desired(e,'iso',d.iso), null, true);
-  const shMeas = d.shutterMeasurement || 'ShutterSpeed';
-  fillSelect(e.shSel,  (d.shutterOpts||[]).map(v=>[v,bmdShutterLabel(v,shMeas)]), desired(e,'shutter',d.shutter), null, true);
-  // Подпись контрола показывает, в чём камера считает выдержку — иначе «180»
-  // рядом с «1/50» у соседней камеры выглядит ошибкой.
-  const shLab = e.card.querySelectorAll('.controls .ctl')[1].querySelector('.ctl-lab');
-  if(shLab) shLab.textContent = (shMeas === 'ShutterAngle') ? 'Shutter °' : 'Shutter';
-  fillSelect(e.gSel,   (d.gainOpts||[]).map(v=>[v,(v>0?'+':'')+v+' dB']), desired(e,'gain',d.gain), null, true);
-  toggleSteps(e.card.querySelector('.iso-minus'), e.card.querySelector('.iso-plus'), e.isoSel);
-  toggleSteps(e.card.querySelector('.sh-minus'),  e.card.querySelector('.sh-plus'),  e.shSel);
-  toggleSteps(e.card.querySelector('.g-minus'),   e.card.querySelector('.g-plus'),   e.gSel);
-
-  const wb = desired(e,'wb',d.wb), tn = desired(e,'tint',d.tint);
-  e.wbVal.textContent = (wb==null || wb==='null') ? '—' : wb + 'K';
-  e.tVal.textContent  = (tn==null || tn==='null') ? '—' : tn;
+  // Регуляторы — те, что оператор положил в карточку. Списки допустимых
+  // значений внутри каждого берутся у самой камеры (§10.0.1).
+  updateParams(e, d);
 }
 
 const COLLAPSE_KEY = 'signalbox.collapsedGroups';
@@ -2145,6 +2460,286 @@ document.getElementById('shareUrl').onclick=copyShare;
 
   window.openSettings = open;      // метка «доступна версия» открывает нужный раздел
 })();
+
+/* =========================================================================
+   КОНСТРУКТОР КАРТОЧКИ — Настройки → Камеры → Sony / Blackmagic
+
+   Слева образец карточки, собранный ТЕМ ЖЕ кодом, что и боевая (sonyCardEl /
+   bmdCardEl + buildParams) — поэтому видно ровно то, что получится, а не
+   отдельно нарисованную картинку, которая рано или поздно разойдётся с делом.
+   Справа — параметры, которых в карточке сейчас нет.
+
+   Перетаскивание: внутри карточки блок едет живьём и сетка сама
+   перестраивается (три в ряд, строк сколько нужно); из списка справа место
+   вставки показывается полоской и вставка происходит по отпусканию. Для тача
+   и мыши без перетаскивания есть «+» в списке и «✕» на блоке.
+   ========================================================================= */
+const VENDOR_TITLE = { sony:'Sony', bmd:'Blackmagic' };
+const plNum = (n, a, b, c) => {
+  const t = n % 10, h = n % 100;
+  return (t === 1 && h !== 11) ? a : (t >= 2 && t <= 4 && (h < 12 || h > 14)) ? b : c;
+};
+
+/* 🔴 Образец — ОДИН НА МАРКУ и ни к какой камере не привязан: раскладка
+   настраивается для всех карточек Sony или всех карточек Blackmagic сразу,
+   поэтому и в настройках стоит абстрактный образ карточки, а не снимок
+   конкретной камеры. Подключена сейчас хоть одна камера этой марки или нет —
+   на конструктор это не влияет вовсе.
+
+   Значения ниже — образцовые, они нужны только чтобы блоки выглядели как в
+   работе. Правило «ничего не выдумывать» (§10.0.1) они не нарушают: здесь
+   ничем не управляют и ни за какие показания себя не выдают — в боевой
+   карточке всё до единого значения приходит от самой камеры. */
+const SAMPLE_SONY = {
+  vendor:'sony', id:'CAM 1', model:'Sony', key:'sample', online:true, rec:false,
+  battery:78, acPower:true, cardMinutes:96, overheat:0,
+  iso:'800', isoEff:null,
+  isoOpts:{ cur:800, rw:true,
+            opts:[[400,'400'],[500,'500'],[640,'640'],[800,'800'],[1000,'1000'],[1250,'1250']] },
+  aperture:{ cur:280, rw:true,
+             opts:[[180,'F1.8'],[200,'F2.0'],[220,'F2.2'],[250,'F2.5'],[280,'F2.8'],[320,'F3.2']] },
+  shutter:{ cur:65586, rw:true,
+            opts:[[65561,'1/25'],[65586,'1/50'],[65596,'1/60'],[65661,'1/125'],[65786,'1/250']] },
+  shutterMeasurement:'ShutterSpeed',
+  wb:{ cur:17, rw:true,
+       opts:[[0,'Авто'],[17,'Дневной свет'],[19,'Облачно'],[20,'Лампа накаливания']] },
+  wbKelvin:5600, wbKelvinRw:true, wbKelvinRange:[2500,9900,100],
+  micGain:{ cur:18, rw:true, opts:[[16,'16'],[17,'17'],[18,'18'],[19,'19'],[20,'20']] },
+};
+const SAMPLE_BMD = {
+  vendor:'bmd', id:'CAM 2', model:'Blackmagic', name:'', key:'bmd:sample',
+  online:true, apiOff:false, rec:false, timecode:'15:02:25:03', recTime:'00:00:00:00',
+  codec:'BRaw:12_1', resolution:[6048,3408], fps:'25', dynamicRange:'Film',
+  tally:'None', powerSource:'AC', milliVolt:11900,
+  iso:1250, isoOpts:[100,200,400,800,1250,1600,3200,6400],
+  gain:10,  gainOpts:[-12,-6,0,6,10,12,18,24],
+  shutter:50, shutterOpts:[25,30,50,60,100,125,200], shutterMeasurement:'ShutterSpeed',
+  wb:5500, wbRange:[2500,10000], tint:0, tintRange:[-50,50],
+  iris:6.2, irisControllable:true, autoExposure:'Off',
+};
+function previewData(vendor){ return (vendor === 'bmd') ? SAMPLE_BMD : SAMPLE_SONY; }
+
+/* Образец: тот же каркас и та же сборка параметров, что у боевой карточки.
+   В cards[] его НЕ регистрируем и в панель не вставляем — иначе опрос стал бы
+   его обновлять и удалять вместе с настоящими. */
+function mkPreviewCard(vendor, d){
+  const e = { camNum:0, vendor, pend:{}, last:null, iso:'AUTO', ohState:0, ohHidden:false };
+  const card = (vendor === 'bmd') ? bmdCardEl(d.model) : sonyCardEl(d.model);
+  card.classList.add('lay-card');
+  if(vendor === 'bmd') bmdRefs(card, e); else sonyRefs(card, e);
+  const grpRow = document.createElement('div');
+  grpRow.className = 'card-grp show';           // «Группа» — тоже постоянная часть
+  grpRow.innerHTML = '<span class="l">Группа</span><select><option>Зал 1</option></select>';
+  e.paramsEl.before(grpRow);
+  buildParams(e, vendor, e.paramsEl);
+  updateCard(e, d);
+  return e;
+}
+
+let layDrag = null;                              // что сейчас тащим и откуда
+function layClearMarks(){
+  document.querySelectorAll('.drop-before,.drop-after').forEach(el=>{
+    el.classList.remove('drop-before','drop-after');
+  });
+  document.querySelectorAll('.card-params.drag-over,.lay-pool.drag-over').forEach(el=>{
+    el.classList.remove('drag-over');
+  });
+}
+/* Перед каким блоком встанет параметр. Блоки идут строками по три, порядок в
+   DOM совпадает с порядком на экране, поэтому достаточно найти первый, левее
+   середины которого (или выше которого) оказался курсор. */
+function layCellBefore(host, x, y){
+  const items = [...host.querySelectorAll('.lay-item')].filter(el => !el.classList.contains('lay-drag'));
+  for(const el of items){
+    const r = el.getBoundingClientRect();
+    if(y < r.top) return el;
+    if(y <= r.bottom && x < r.left + r.width / 2) return el;
+  }
+  return null;                                   // ниже и правее всех — в конец
+}
+function layMark(host, before){
+  layClearMarks();
+  host.classList.add('drag-over');
+  if(before){ before.classList.add('drop-before'); return; }
+  const items = host.querySelectorAll('.lay-item');
+  if(items.length) items[items.length - 1].classList.add('drop-after');
+}
+
+function layCommitOrder(vendor, host){
+  cardLayout[vendor] = [...host.querySelectorAll('.lay-item')].map(el => el.dataset.pid).filter(Boolean);
+  applyLayout(vendor);
+  renderVend(vendor);
+}
+function layInsert(vendor, pid, idx){
+  const lay = layoutFor(vendor);
+  if(lay.includes(pid)) return;
+  lay.splice(Math.max(0, Math.min(lay.length, idx)), 0, pid);
+  applyLayout(vendor);
+  renderVend(vendor);
+}
+function layRemove(vendor, pid){
+  const lay = layoutFor(vendor);
+  const i = lay.indexOf(pid);
+  if(i < 0) return;
+  lay.splice(i, 1);
+  applyLayout(vendor);
+  renderVend(vendor);
+}
+
+/* Сделать сетку образца редактируемой: блоки тащатся, у каждого «✕». */
+function layWireGrid(host, vendor){
+  [...host.children].forEach(el=>{
+    el.classList.add('lay-item');
+    el.draggable = true;
+    el.title = 'Перетащите, чтобы поменять место';
+    const x = document.createElement('button');
+    x.className = 'lay-x'; x.textContent = '✕'; x.title = 'Убрать из карточки';
+    x.onclick = ev => { ev.stopPropagation(); layRemove(vendor, el.dataset.pid); };
+    el.appendChild(x);
+    el.addEventListener('dragstart', ev=>{
+      layDrag = { vendor, pid:el.dataset.pid, from:'card' };
+      el.classList.add('lay-drag');
+      ev.dataTransfer.setData('text/plain', el.dataset.pid);
+      ev.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', ()=>{
+      el.classList.remove('lay-drag');
+      // Отпустили мимо (Esc или вне окна) — вернуть как было: живьём мы двигали
+      // сам блок, и без этого на экране осталась бы несохранённая раскладка.
+      if(layDrag){ layDrag = null; renderVend(vendor); }
+      layClearMarks();
+    });
+  });
+  if(!host.children.length){
+    const ph = document.createElement('div');
+    ph.className = 'lay-empty';
+    ph.textContent = 'Перетащите сюда параметры';
+    host.appendChild(ph);
+  }
+  host.addEventListener('dragover', ev=>{
+    if(!layDrag || layDrag.vendor !== vendor) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = layDrag.from === 'card' ? 'move' : 'copy';
+    const before = layCellBefore(host, ev.clientX, ev.clientY);
+    if(layDrag.from === 'card'){
+      const moving = host.querySelector('.lay-drag');
+      if(moving && before !== moving){
+        if(before) host.insertBefore(moving, before); else host.appendChild(moving);
+      }
+      host.classList.add('drag-over');
+    }else{
+      layMark(host, before);                     // тащат из списка — показываем место вставки
+    }
+  });
+  host.addEventListener('drop', ev=>{
+    if(!layDrag || layDrag.vendor !== vendor) return;
+    ev.preventDefault();
+    const st = layDrag; layDrag = null;
+    if(st.from === 'card'){
+      const moving = host.querySelector('.lay-drag');
+      if(moving) moving.classList.remove('lay-drag');
+      layCommitOrder(vendor, host);
+    }else{
+      const before = layCellBefore(host, ev.clientX, ev.clientY);
+      const items  = [...host.querySelectorAll('.lay-item')];
+      layInsert(vendor, st.pid, before ? items.indexOf(before) : items.length);
+    }
+    layClearMarks();
+  });
+}
+
+function renderVend(vendor, box){
+  box = box || document.querySelector(`#layEditors .vend[data-vendor="${vendor}"]`);
+  if(!box) return;
+  const lay  = layoutFor(vendor);
+  const rest = paramList(vendor).filter(p => !lay.includes(p.id));
+  box.querySelector('.vend-head .n').textContent =
+    lay.length + ' ' + plNum(lay.length, 'параметр', 'параметра', 'параметров') + ' в карточке';
+
+  const body = box.querySelector('.vend-body');
+  body.innerHTML =
+    `<div class="lay-wrap">
+       <div class="lay-left">
+         <div class="lay-cap">Образец — по нему строятся ВСЕ карточки марки</div>
+       </div>
+       <div class="lay-right">
+         <div class="lay-cap">Можно добавить</div>
+         <div class="lay-pool"></div>
+         <button class="lay-reset" title="Вернуть набор и порядок по умолчанию">Вернуть как было</button>
+         <div class="lay-hint">Мышью — перетаскиванием: блок можно бросить в карточку,
+           вынести из неё или переставить внутри; ряд — три параметра.
+           На телефоне перетаскивания нет — пользуйтесь «+» здесь и «✕» на блоке.</div>
+       </div>
+     </div>`;
+  const left = body.querySelector('.lay-left');
+  const prev = mkPreviewCard(vendor, previewData(vendor));
+  left.appendChild(prev.card);
+  layWireGrid(prev.paramsEl, vendor);
+
+  const pool = body.querySelector('.lay-pool');
+  if(!rest.length){
+    pool.innerHTML = '<div class="pool-empty">Все параметры уже в карточке</div>';
+  }else{
+    rest.forEach(p=>{
+      const it = document.createElement('div');
+      it.className = 'pool-item';
+      it.draggable = true;
+      it.dataset.pid = p.id;
+      it.innerHTML = `<span class="t">${p.lab}</span><span class="d">${p.hint}</span>` +
+                     `<button class="add" title="Добавить в конец">+</button>`;
+      it.querySelector('.add').onclick = ev => { ev.stopPropagation(); layInsert(vendor, p.id, layoutFor(vendor).length); };
+      it.addEventListener('dragstart', ev=>{
+        layDrag = { vendor, pid:p.id, from:'pool' };
+        ev.dataTransfer.setData('text/plain', p.id);
+        ev.dataTransfer.effectAllowed = 'copy';
+      });
+      it.addEventListener('dragend', ()=>{ layDrag = null; layClearMarks(); });
+      pool.appendChild(it);
+    });
+  }
+  // бросок в список = убрать из карточки
+  pool.addEventListener('dragover', ev=>{
+    if(!layDrag || layDrag.vendor !== vendor || layDrag.from !== 'card') return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'move';
+    pool.classList.add('drag-over');
+  });
+  pool.addEventListener('dragleave', ()=>pool.classList.remove('drag-over'));
+  pool.addEventListener('drop', ev=>{
+    if(!layDrag || layDrag.vendor !== vendor || layDrag.from !== 'card') return;
+    ev.preventDefault();
+    const st = layDrag; layDrag = null;
+    layClearMarks();
+    layRemove(vendor, st.pid);
+  });
+
+  body.querySelector('.lay-reset').onclick = ()=>{
+    cardLayout[vendor] = [...LAYOUT_DEFAULT[vendor]];
+    applyLayout(vendor);
+    renderVend(vendor);
+  };
+}
+
+function renderLayoutEditors(){
+  const host = document.getElementById('layEditors');
+  if(!host) return;
+  const opened = {};
+  host.querySelectorAll('.vend').forEach(v => { opened[v.dataset.vendor] = v.classList.contains('open'); });
+  host.innerHTML = '';
+  ['sony','bmd'].forEach(vendor=>{
+    const box = document.createElement('div');
+    box.className = 'vend' + (opened[vendor] ? ' open' : '');
+    box.dataset.vendor = vendor;
+    box.innerHTML =
+      `<button class="vend-head"><span class="tri">▶</span>${VENDOR_TITLE[vendor]}<span class="n"></span></button>
+       <div class="vend-body"></div>`;
+    box.querySelector('.vend-head').onclick = ()=>box.classList.toggle('open');
+    host.appendChild(box);
+    renderVend(vendor, box);
+  });
+}
+renderLayoutEditors();      // один раз при загрузке: образец не меняется от камер
+loadCardLayout();           // раскладка приходит с сервера — общая на студию
 
 /* ---------- обновление программы ----------
    Версия и проверка живут на сервере; панель только показывает и нажимает.

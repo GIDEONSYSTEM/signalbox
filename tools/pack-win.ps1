@@ -15,7 +15,7 @@
 #     обновления ищет ровно это имя (payloadName() в main.cpp);
 #   * метка «-win» в имени файла обязательна: по ней приложение выбирает свою
 #     сборку из релиза, где лежат обе (см. src/UpdateAsset.h);
-#   * 🐞 данные студии (cameras.txt, groups.json, ...) в архив попасть не должны:
+#   * 🐞 данные студии (cameras.txt, groups.json, cardlayout.json, ...) в архив попасть не должны:
 #     robocopy при обновлении затрёт ими рабочие файлы. §7 на этом уже спотыкался,
 #     поэтому здесь и явный список включаемого, и проверка результата;
 #   * версия читается из src\main.cpp, чтобы имя архива и тег релиза не разошлись.
@@ -71,7 +71,7 @@ foreach ($extra in 'ЧИТАЙ-МЕНЯ.txt', 'START_SignalBox.bat') {
 # --- проверка состава ДО упаковки ---
 Write-Host '  проверяю, что данных установки и следов сборки внутри нет'
 $forbidden = @()
-foreach ($bad in 'cameras.txt','cameras-known.txt','groups.json','settings.json','firewall-skip.txt') {
+foreach ($bad in 'cameras.txt','cameras-known.txt','groups.json','settings.json','cardlayout.json','firewall-skip.txt') {
     if (Get-ChildItem $payload -Recurse -Filter $bad -ErrorAction SilentlyContinue) { $forbidden += $bad }
 }
 # .lnk — абсолютные пути этой машины, на чужой он битый; .lib/.pdb/.log — не для релиза.
