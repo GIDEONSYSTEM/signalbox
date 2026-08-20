@@ -339,6 +339,7 @@
   .card.unavail .bmd-off{display:block;}
   .card.unavail .card-params, .card.unavail .bmd-fmt{opacity:.35; pointer-events:none;}
   .card.unavail .rec-btn, .card.unavail .bmd-tc, .card.unavail .bmd-tally{opacity:.35;}
+  .card.unavail .rec-btn{pointer-events:none;}   /* у недоступной камеры кнопка не нажимается */
   /* Не отвечает — это иная беда, чем выключенное управление: другой цвет. */
   .card.is-lost{border-color:rgba(255,77,77,.45);}
   .card.is-lost .bmd-off{background:rgba(255,77,77,.08); border-color:rgba(255,77,77,.4); color:var(--crit);}
@@ -1742,7 +1743,7 @@ function bmdCardEl(model){
       <div class="bmd-tally">tally</div>
       <div class="bmd-lost">Offline</div>
       <div class="bmd-tc">--:--:--:--</div>
-      <div class="rec-btn off" title="Управление записью для Blackmagic ещё не подключено"><span class="ic"></span><span class="t">REC</span></div>
+      <div class="rec-btn" title="Старт и стоп записи"><span class="ic"></span><span class="t">REC</span></div>
     </div></div></div>
     <div class="bmd-fmt">
       <span class="bmd-name"></span><b class="f-codec">—</b><span class="f-res"></span><span class="f-fps"></span><span class="f-dr"></span><span class="bmd-pw"></span>
@@ -1774,6 +1775,11 @@ function buildBmdCard(cam){
   const card = bmdCardEl(cam.model);
   const e = { id: cam.id, camNum, vendor:'bmd', pend:{}, last:null };
   bmdRefs(card, e);
+  // Тумблер записи: кнопка сама и есть индикатор (тот же принцип, что у Sony).
+  // Состояние берём из последнего ответа камеры, а не из своего представления —
+  // у BM код 204 значит «принято», а не «пишет».
+  e.recBtn.onclick = ()=>{ e.recBtn.classList.add('pending');
+                           cmd({cam:e.camNum, action:'rec', value:e.rec?'stop':'start'}); };
 
   // группы и перетаскивание — общие с сониевской карточкой
   e.key = cam.key || '';
@@ -1839,7 +1845,9 @@ function updateBmdCard(e, d){
   e.fFps.textContent   = d.fps ? `· ${d.fps}p` : '';
   e.fDr.textContent    = d.dynamicRange ? `· ${d.dynamicRange}` : '';
 
-  e.recBtn.classList.toggle('rec', d.rec === true);
+  e.rec = d.rec === true;
+  e.recBtn.classList.toggle('rec', e.rec);
+  e.recBtn.classList.remove('pending');        // камера ответила — снимаем ожидание
 
   // Регуляторы — те, что оператор положил в карточку. Списки допустимых
   // значений внутри каждого берутся у самой камеры (§10.0.1).
