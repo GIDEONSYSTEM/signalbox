@@ -96,6 +96,9 @@ private:
         std::string field;     // "iso"
         long long   want = 0;
         int         tries = 0;
+        // Запись включается не записью свойства, а командой POST без тела
+        // (PUT {"recording":bool} помечен в спеке камеры как устаревший).
+        bool        isPost = false;
     };
     static constexpr int kSetRetries = 3;
 

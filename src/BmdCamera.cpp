@@ -530,11 +530,16 @@ void BmdCamera::reconcile() {
             // «неизвестным», и мы зря досылаем команду и жалуемся в лог.
             else if (f == "shutterSpeed" ||
                      f == "shutterAngle")     cur = m_slow.shutter;
+            else if (f == "recording")        cur = m_rec.load() ? 1 : 0;
 
             if (cur == it->second.want) { it = m_pending.erase(it); continue; }
             if (++it->second.tries > kSetRetries) {
-                blog("[BMD %s] %s: просили %lld, камера держит %lld — больше не настаиваю.\n",
-                     m_deviceName.c_str(), f.c_str(), it->second.want, cur);
+                if (f == "recording")
+                    blog("[BMD %s] запись не началась: команда принята, но камера не пишет. "
+                         "Проверь носитель.\n", m_deviceName.c_str());
+                else
+                    blog("[BMD %s] %s: просили %lld, камера держит %lld — больше не настаиваю.\n",
+                         m_deviceName.c_str(), f.c_str(), it->second.want, cur);
                 it = m_pending.erase(it);
                 continue;
             }
@@ -545,6 +550,7 @@ void BmdCamera::reconcile() {
     std::string host; int port;
     { std::lock_guard<std::mutex> lk(m_hostMx); host = m_host; port = m_port; }
     for (const Pending& p : retry) {
+        if (p.isPost) { net::post(host, port, std::string(kApi) + p.path, std::string(), 3000); continue; }
         const std::string body = "{\"" + p.field + "\":" + std::to_string(p.want) + "}";
         net::put(host, port, std::string(kApi) + p.path, body, 3000);
     }
@@ -567,9 +573,25 @@ bool BmdCamera::command(const std::string& action, const std::string& value) {
         return writeNum("/video/shutter", angle ? "shutterAngle" : "shutterSpeed", v);
     }
     if (action == "rec") {
-        blog("[BMD %s] запись пока не подключена (нужна проверка на камере с картой).\n",
-             m_deviceName.c_str());
-        return false;
+        const bool start = (value == "start");
+        // По спеке камеры: старт — POST /transports/0/record, стоп — POST
+        // /transports/0/stop. PUT {"recording":bool} помечен как DEPRECATED.
+        const std::string path = start ? "/transports/0/record" : "/transports/0/stop";
+        std::string host; int port;
+        { std::lock_guard<std::mutex> lk(m_hostMx); host = m_host; port = m_port; }
+        if (host.empty()) return false;
+        const net::Resp r = net::post(host, port, std::string(kApi) + path, std::string(), 4000);
+        if (!r.ok()) {
+            blog("[BMD %s] запись (%s): не принято (код %d%s%s).\n", m_deviceName.c_str(),
+                 start ? "старт" : "стоп", r.status, r.err.empty() ? "" : ", ", r.err.c_str());
+            return false;
+        }
+        // 🔴 204 значит «принято», а не «пишет»: без носителя камера отвечает
+        // успехом и не начинает. Ждём подтверждения от самой камеры.
+        { std::lock_guard<std::mutex> lk(m_pendMx);
+          Pending p; p.path = path; p.field = "recording"; p.want = start ? 1 : 0; p.isPost = true;
+          m_pending["recording"] = p; }
+        return true;
     }
     blog("[BMD %s] действие «%s» эта камера не умеет.\n", m_deviceName.c_str(), action.c_str());
     return false;
