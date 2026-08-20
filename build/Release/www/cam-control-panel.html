@@ -875,7 +875,7 @@ function lvFsEnter(e){
 }
 
 function lvFsExit(e){
-  if(!e || !e.lvFrame.classList.contains('fs')) return;
+  if(!e || !e.lvFrame || !e.lvFrame.classList.contains('fs')) return;
   // Сначала отпускаем полноэкранный режим устройства, потом возвращаем узлы:
   // иначе браузер выйдет из него сам, когда элемент уедет из <body>.
   const cur = document.fullscreenElement || document.webkitFullscreenElement;
@@ -954,6 +954,7 @@ function lvStart(e){
 }
 function lvStop(e){
   lvFsExit(e);                  // закрыли раздел — полноэкранному режиму неоткуда брать кадры
+  if(!e || !e.lvImg) return;    // карточка без превью (Blackmagic) — останавливать нечего
   e.lvOn=false;
   if(e.lvTimer){ clearTimeout(e.lvTimer); e.lvTimer=null; }
   if(e.lvUrl){ URL.revokeObjectURL(e.lvUrl); e.lvUrl=null; }
