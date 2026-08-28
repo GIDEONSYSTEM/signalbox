@@ -235,8 +235,16 @@
      специфичности, поэтому ту же ширину назначаем ему отдельно. */
   body.lay-h .grp{margin-left:0; margin-right:auto; width:var(--grp-w, 100%);}
   body.lay-h #ungrouped{max-width:none; margin-left:0; width:var(--grp-w, 100%);}
+  /* 🔴 Колонок ровно столько, сколько насчитал sizeGroups, — БЕЗ auto-fill.
+     Движки расходятся в том, по какому размеру дорожки auto-fill набирает
+     повторения: Chrome считает по максимуму minmax() (392), другие — по
+     минимуму (340). Из-за этого коробка, посчитанная в JS по одному правилу,
+     не сходилась с сеткой, разложенной по другому: карточек в ряду меньше, а
+     справа пустое место. Явное число колонок убирает саму развилку.
+     minmax(0, --card-w): дорожки делят ширину поровну, но шире карточки не
+     растут; --grp-w подобран так, что уже --card-min они тоже не станут. */
   body.lay-h .grp-body{display:grid; justify-content:start; align-items:start;
-              grid-template-columns:repeat(auto-fill, minmax(min(100%, var(--card-min)), var(--card-w)));}
+              grid-template-columns:repeat(var(--grp-cols, 1), minmax(0, var(--card-w)));}
   /* подсказка пустой группы — во всю строку, иначе жмётся в первую колонку */
   body.lay-h .grp-body .grp-hint{grid-column:1 / -1;}
   .card.dragging{opacity:.4;}
@@ -2559,18 +2567,24 @@ function sizeGroups(){
   if(!groupsWrap) return;
   const root = getComputedStyle(document.documentElement);
   const card = parseFloat(root.getPropertyValue('--card-w'));
+  const min  = parseFloat(root.getPropertyValue('--card-min'));
   const gap  = parseFloat(root.getPropertyValue('--card-gap'));
-  if(!(card > 0)) return;
+  if(!(card > 0) || !(min > 0)) return;
   [...groupsWrap.querySelectorAll('.grp'), ungroupedWrap].forEach(el=>{
     if(!el || !el.parentElement) return;
     const cs = getComputedStyle(el);
     const chrome = parseFloat(cs.paddingLeft)     + parseFloat(cs.paddingRight)
                  + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
     const avail = el.parentElement.clientWidth - chrome;
-    const fits  = Math.max(1, Math.floor((avail + gap) / (card + gap)));
+    // Колонок — сколько влезет, если позволить карточкам ужаться до --card-min.
+    const fits  = Math.max(1, Math.floor((avail + gap) / (min + gap)));
     const cams  = Math.max(1, el.querySelectorAll('.grp-body > .card').length);
     const cols  = Math.min(cams, fits);
-    const w     = Math.min(avail, cols * card + (cols - 1) * gap) + chrome;
+    // Ширина под эти колонки по полной --card-w, но не больше доступной. Если
+    // упёрлись в доступную — дорожки поделят её поровну и выйдут между
+    // --card-min и --card-w: уже минимума они не станут по построению fits.
+    const w = Math.min(avail, cols * card + (cols - 1) * gap) + chrome;
+    el.style.setProperty('--grp-cols', cols);
     el.style.setProperty('--grp-w', Math.round(w) + 'px');
   });
 }
